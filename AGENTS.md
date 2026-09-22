@@ -20,7 +20,7 @@ Correct report identity and complete, readable English PDFs are required. Optimi
 1. Run `py -m pytest -q` before a substantial code change and after it.
 2. Build/verify the company universe and metadata for the requested set. Use `ar-harvest plan` on a direct manifest. Resolve conflicts and invalid identities before transferring files.
 3. Use `ar-harvest run` for direct PDFs and `ar-harvest sr-ingest-zip` for authorized bulk ZIPs. Use a local SSD output directory. The engine already handles host interleaving, SEC rate limits, bounded retries, PDF validation, SHA-256, atomic writes, and SQLite state. Do not launch one browser per report or perform search while download workers are occupied.
-4. Run `ar-harvest verify` for direct downloads. Check the ZIP ingestion summary and `bulk_reports` SQLite table for bulk files. Audit all exceptions and spot-check report title, issuer, fiscal year, language, and completeness. Check for orphaned `.part` files.
+4. Run `ar-harvest verify` for direct downloads. For AnnualReports.com, also run `annualreports-audit` and review every row marked `REVIEW` before reporting completion. Check the ZIP ingestion summary and `bulk_reports` SQLite table for bulk files. Audit all exceptions and spot-check report title, issuer, fiscal year, language, and completeness. Check for orphaned `.part` files.
 5. Report requested, resolved, verified, failed, and unresolved company-years separately. Give actual elapsed time and throughput, plus the source and output directory. Do not equate local synthetic speed with internet throughput.
 
 ## Continuous speed experiments

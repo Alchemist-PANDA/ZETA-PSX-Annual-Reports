@@ -19,9 +19,10 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
+import fitz
 from bs4 import BeautifulSoup
 
-from .catalog import FIELDS, Report, _url
+from .catalog import FIELDS, Report, _url, load_manifest
 from .discovery import Company, read_universe
 from .engine import RateGate
 
@@ -238,3 +239,58 @@ async def discover(universe: Path, manifest: Path, unresolved: Path, cache: Path
     return {"companies_requested": len(companies), "reports_discovered": len(found),
             "unresolved_slots": len(missing), "source_blocked": client.blocked,
             "manifest": str(manifest), "unresolved": str(unresolved)}
+
+
+def audit_reports(universe: Path, manifest: Path, output_root: Path,
+                  review_output: Path) -> dict:
+    """Check semantic clues without treating OCR or absence of text as success."""
+    companies = {(company.country, company.isin): company for company in read_universe(universe)}
+    reports = load_manifest(manifest)
+    rows = []
+    passed = 0
+    for report in reports:
+        company = companies.get((report.country, report.isin))
+        target = output_root / report.relative_path
+        reasons = []
+        pages = 0
+        if company is None:
+            reasons.append("company absent from universe")
+        if not target.is_file():
+            reasons.append("PDF missing")
+        else:
+            try:
+                with fitz.open(target) as pdf:
+                    pages = pdf.page_count
+                    if not pdf.is_pdf or pdf.needs_pass or pdf.is_repaired or pages < 1:
+                        reasons.append("invalid PDF")
+                    else:
+                        sample = sorted(set(range(min(5, pages))) |
+                                        set(range(max(0, pages - 5), pages)))
+                        content = _normalize(" ".join(pdf[index].get_text() for index in sample))
+                        if not content:
+                            reasons.append("no extractable text in sampled pages")
+                        if str(int(report.fiscal_year[2:])) not in content:
+                            reasons.append("fiscal year not found in sampled pages")
+                        if company:
+                            tokens = [word for word in _normalize(company.company_name).split()
+                                      if len(word) >= 4]
+                            if tokens and sum(word in content for word in tokens) < min(2, len(tokens)):
+                                reasons.append("company name not found in sampled pages")
+            except (fitz.FileDataError, OSError) as exc:
+                reasons.append(f"PDF read error: {exc}")
+        status = "REVIEW" if reasons else "PASS"
+        passed += status == "PASS"
+        rows.append({"relative_path": report.relative_path.as_posix(),
+                     "company_name": company.company_name if company else "",
+                     "fiscal_year": report.fiscal_year,
+                     "status": status, "reason": "; ".join(reasons),
+                     "pages": pages, "source_page": report.source_page})
+    review_output.parent.mkdir(parents=True, exist_ok=True)
+    with review_output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("relative_path", "company_name",
+                                                  "fiscal_year", "status", "reason",
+                                                  "pages", "source_page"))
+        writer.writeheader()
+        writer.writerows(rows)
+    return {"checked": len(reports), "passed": passed, "review": len(reports) - passed,
+            "output": str(review_output)}

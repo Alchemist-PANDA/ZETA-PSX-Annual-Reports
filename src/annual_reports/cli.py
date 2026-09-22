@@ -22,7 +22,8 @@ from .conversion import render_sec_html
 from .fca_conversion import render_fca_originals
 from .sustainability import import_metadata, ingest_zip
 from .annualreports import import_annualreports
-from .annualreports_site import discover as discover_annualreports_site
+from .annualreports_site import (audit_reports as audit_annualreports_site,
+                                 discover as discover_annualreports_site)
 from .engine import RunLock, Settings, StateStore, native_path, run, verify_store
 
 
@@ -63,6 +64,11 @@ def parser() -> argparse.ArgumentParser:
     ars_site.add_argument("--years", default="2017:2025")
     ars_site.add_argument("--refresh", action="store_true")
     ars_site.add_argument("--limit-companies", type=int)
+    ars_audit = commands.add_parser("annualreports-audit", help="check downloaded PDFs for company and fiscal-year text")
+    ars_audit.add_argument("universe", type=Path)
+    ars_audit.add_argument("manifest", type=Path)
+    ars_audit.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
+    ars_audit.add_argument("--review", type=Path, default=Path("annualreports-content-review.csv"))
     plan = commands.add_parser("plan", help="validate a CSV manifest and show its download plan")
     plan.add_argument("manifest", type=Path)
     plan.add_argument("--allow-http", action="store_true", help="local testing only")
@@ -133,6 +139,11 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "annualreports-audit":
+            summary = audit_annualreports_site(args.universe, args.manifest,
+                                                args.output_root, args.review)
+            print(json.dumps(summary, indent=2))
+            return 1 if summary["review"] else 0
         if args.command == "annualreports-discover":
             years = parse_years(args.years)
             summary = asyncio.run(discover_annualreports_site(

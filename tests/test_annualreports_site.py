@@ -2,8 +2,10 @@ import asyncio
 import csv
 
 import pytest
+import fitz
 
-from annual_reports.annualreports_site import PageClient, discover, parse_profile, search_links
+from annual_reports.annualreports_site import (PageClient, audit_reports, discover,
+                                               parse_profile, search_links)
 from annual_reports.catalog import Report, load_manifest
 from annual_reports.engine import Settings, run
 
@@ -51,6 +53,17 @@ def test_discovery_writes_sop_manifest_and_missing_years(tmp_path, monkeypatch):
     reports = load_manifest(manifest)
     assert {r.fiscal_year for r in reports} == {"FY2024", "FY2025"}
     assert all(r.report_type == "AR" for r in reports)
+    for report in reports:
+        target = tmp_path / "output" / report.relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with fitz.open() as pdf:
+            pdf.new_page().insert_text((72, 72), "Microsoft Corporation 2025 Annual Report")
+            target.write_bytes(pdf.tobytes())
+    audit = tmp_path / "audit.csv"
+    summary = audit_reports(universe, manifest, tmp_path / "output", audit)
+    assert summary["passed"] == 1
+    assert summary["review"] == 1
+    assert "fiscal year not found" in audit.read_text(encoding="utf-8")
 
 
 def test_hosted_transfer_requires_explicit_access(tmp_path):

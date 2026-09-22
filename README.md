@@ -11,9 +11,10 @@ ar-harvest annualreports-discover companies.csv --years 2017:2025
 ar-harvest plan annualreports-direct.csv
 ar-harvest run annualreports-direct.csv --authorized-hosted --workers 32 --per-host 2 --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
 ar-harvest verify --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+ar-harvest annualreports-audit companies.csv annualreports-direct.csv --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
 ```
 
-The `--authorized-hosted` flag explicitly enables automated AnnualReports.com PDF transfers when your access permits them. Start at two connections per host and tune with the accuracy-gated benchmark. Inspect `annualreports-unresolved.csv` and use SEC/FCA or official company archives for gaps. Discovery never guesses PDF URLs or downloads files while resolving company pages.
+The `--authorized-hosted` flag explicitly enables automated AnnualReports.com PDF transfers when your access permits them. Start at two connections per host and tune with the accuracy-gated benchmark. Inspect `annualreports-unresolved.csv` and use SEC/FCA or official company archives for gaps. `annualreports-audit` checks readable opening and ending pages for company and fiscal-year clues and writes `annualreports-content-review.csv`; flagged files need review, especially scanned PDFs. Discovery never guesses PDF URLs or downloads files while resolving company pages.
 
 For an authorized metadata export or vendor-provided ZIP, use `annualreports-import` and `annualreports-ingest-zip` instead. The normalized metadata CSV columns are `country,isin,report_year,report_title,pdf_url,zip_member,source_page`. Match the supplied universe by exact country and ISIN. `pdf_url` is a direct HTTPS PDF URL; `zip_member` is the exact path inside an authorized ZIP. At least one is required. The importer writes an SOP-compliant direct manifest, a bulk ZIP index, and a review CSV before transfer.
 
