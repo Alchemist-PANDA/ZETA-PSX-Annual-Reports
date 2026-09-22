@@ -1,5 +1,9 @@
 # US and UK annual report harvester
 
+## Sustainability pilot: first two companies
+
+`examples/sustainability-first-two.csv` adds Microsoft and Coca-Cola official PDF candidates from the supplied sustainability research. Run `ar-harvest plan examples/sustainability-first-two.csv`, then `ar-harvest run examples/sustainability-first-two.csv --output-root <local-SSD-folder> --state harvest.sqlite3`. Coca-Cola's business/sustainability reports use `IR`; its environmental updates use `CLIMATE`, so they are not mislabeled as standalone sustainability reports. The file includes only source URLs provided in the research; missing company-years remain unresolved. The full 2017–2025 US/UK pipeline specification is in `docs/sustainability-pipeline.md`. Its authorized bulk-portal route requires a portal export and is not yet implemented.
+
 A local, resumable discovery and PDF ingestion system for US and UK annual reports, fiscal years 2017–2025. It follows the supplied **Phase-1 SOP: Folder & PDF File Naming Standard** and uses the two authoritative sources specified in `AR sources.txt`: SEC EDGAR and FCA NSM.
 
 ## Current scope
