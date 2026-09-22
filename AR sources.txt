@@ -1,0 +1,2220 @@
+Below is the guide I would give the coding agent. It is deliberately written as an **execution specification**, not a comparison of sources.
+
+<writing_block type="document" title="Production-Grade US + UK Annual Report Extraction — Agent Execution Guide">
+
+# Production-Grade Annual Report Extraction Engine
+
+## Scope: United States + United Kingdom, fiscal years 2017–2025
+
+## Mission
+
+Build a restart-safe, production-grade ingestion system that collects annual reports for a supplied universe of US and UK companies for fiscal years **2017 through 2025**.
+
+Use exactly these two primary sources:
+
+```text
+USA → SEC EDGAR
+UK  → FCA National Storage Mechanism (NSM)
+```
+
+The system must be optimized for:
+
+```text
+bulk metadata discovery
+→ zero unnecessary searches
+→ direct document URLs
+→ asynchronous downloading
+→ local SSD staging
+→ automatic validation
+→ SHA-256 deduplication
+→ checkpointing
+→ retry/resume
+```
+
+Do not browse company pages one by one.
+
+Do not use Google search for ordinary discovery.
+
+Do not launch browsers for ordinary downloading.
+
+Do not discover and download serially.
+
+The program should be able to crash, restart, and continue from exactly where it stopped.
+
+---
+
+# PART I — GLOBAL SYSTEM DESIGN
+
+## 1. Required stack
+
+Implement in Python 3.11+.
+
+Use:
+
+```text
+Python
+asyncio
+httpx
+SQLite in WAL mode
+PyMuPDF
+lxml or selectolax
+hashlib
+aiofiles
+tenacity or custom retry logic
+rich for live terminal UI
+```
+
+Optional:
+
+```text
+Playwright
+```
+
+Use Playwright only for local HTML→PDF rendering or as an exceptional fallback.
+
+Do not use Selenium.
+
+---
+
+# 2. Directory layout
+
+Create:
+
+```text
+annual-report-engine/
+│
+├── app/
+│   ├── discovery/
+│   │   ├── sec.py
+│   │   └── fca.py
+│   │
+│   ├── download/
+│   │   ├── scheduler.py
+│   │   ├── worker.py
+│   │   └── limiters.py
+│   │
+│   ├── validation/
+│   │   ├── pdf.py
+│   │   ├── html.py
+│   │   └── semantic.py
+│   │
+│   ├── storage/
+│   │   ├── database.py
+│   │   └── files.py
+│   │
+│   └── cli.py
+│
+├── cache/
+│   ├── sec/
+│   └── fca/
+│
+├── staging/
+│
+├── reports/
+│   ├── US/
+│   └── UK/
+│
+├── logs/
+│
+├── manifest.sqlite
+└── config.yaml
+```
+
+---
+
+# 3. Database is the source of truth
+
+Never determine completion by looking at folders.
+
+Create at minimum these tables:
+
+```sql
+companies
+reports
+downloads
+validation
+errors
+benchmark_runs
+```
+
+Recommended `companies` fields:
+
+```text
+company_id
+country
+company_name
+ticker
+cik
+lei
+exchange
+active
+```
+
+Recommended `reports` fields:
+
+```text
+report_id
+company_id
+country
+
+report_year
+fiscal_year_end
+
+source
+source_record_id
+
+form_type
+category
+
+filing_date
+publication_date
+
+accession_number
+primary_document
+
+source_url
+source_format
+
+status
+priority
+
+local_path
+bytes
+sha256
+
+attempts
+last_error
+
+discovered_at
+download_started_at
+downloaded_at
+validated_at
+```
+
+Use statuses:
+
+```text
+DISCOVERED
+QUEUED
+DOWNLOADING
+DOWNLOADED
+VALIDATING
+VERIFIED
+
+RETRY
+RATE_LIMITED
+NOT_FOUND
+INVALID
+DUPLICATE
+MANUAL_REVIEW
+```
+
+On startup:
+
+```sql
+UPDATE reports
+SET status='RETRY'
+WHERE status='DOWNLOADING';
+```
+
+This prevents interrupted downloads from becoming stuck forever.
+
+---
+
+# 4. Never write directly to final filename
+
+Always:
+
+```text
+AAPL_2024_AR.pdf.part
+```
+
+then after complete download and validation:
+
+```text
+atomic rename
+        ↓
+AAPL_2024_AR.pdf
+```
+
+A `.part` file must never count as completed.
+
+---
+
+# 5. One manifest before mass downloading
+
+The full pipeline must be:
+
+```text
+COMPANY UNIVERSE
+       ↓
+DISCOVERY
+       ↓
+MANIFEST.SQLITE
+       ↓
+EXPECTED COMPANY-YEAR GRID
+       ↓
+DOWNLOAD QUEUE
+       ↓
+VALIDATION
+       ↓
+FINAL STORAGE
+```
+
+Do not mix discovery logic with individual download workers.
+
+---
+
+# PART II — US ENGINE: SEC EDGAR
+
+## 6. SEC constants
+
+Use these roots:
+
+```text
+Bulk submissions:
+
+https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip
+```
+
+SEC says the bulk submissions ZIP is rebuilt nightly and describes bulk ZIPs as the most efficient way to retrieve large quantities of API data. ([SEC][1])
+
+Individual submissions endpoint:
+
+```text
+https://data.sec.gov/submissions/CIK##########.json
+```
+
+Archive root:
+
+```text
+https://www.sec.gov/Archives/edgar/data/
+```
+
+Quarterly indexes:
+
+```text
+https://www.sec.gov/Archives/edgar/full-index/
+```
+
+Company/ticker mapping:
+
+```text
+https://www.sec.gov/files/company_tickers_exchange.json
+```
+
+---
+
+# 7. Mandatory SEC headers
+
+Every SEC request must identify the application.
+
+Configure:
+
+```python
+SEC_HEADERS = {
+    "User-Agent": "AnnualReportResearch your-real-email@example.com",
+    "Accept-Encoding": "gzip, deflate",
+}
+```
+
+Replace the email with the real operator contact.
+
+SEC specifically requests a declared User-Agent for automated access. ([SEC][2])
+
+---
+
+# 8. SEC request-rate controller
+
+Never exceed:
+
+```text
+10 requests / second total
+```
+
+across the application.
+
+SEC's current Fair Access guidance specifies no more than 10 requests per second regardless of the number of machines being used. ([SEC][3])
+
+Configure production target:
+
+```text
+8.5–9.0 requests/sec
+```
+
+Use a **global token bucket**.
+
+Example conceptual configuration:
+
+```python
+SEC_RATE = 8.8
+SEC_BURST = 2
+SEC_MAX_CONNECTIONS = 24
+```
+
+Important:
+
+```text
+connections ≠ requests/sec
+```
+
+24 open keep-alive connections are acceptable internally, while the token bucket still permits only about 8.8 new requests each second.
+
+The limiter must sit immediately before every SEC HTTP request.
+
+---
+
+# 9. SEC discovery phase
+
+### Phase A — download bulk metadata once
+
+At startup:
+
+```text
+cache/sec/submissions.zip
+```
+
+If the cached copy is current enough for the run, reuse it.
+
+Otherwise download once.
+
+Then extract locally.
+
+Do not make 10,000 individual Submissions API requests when the bulk dataset already exists.
+
+SEC's entity JSON contains at least one year or 1,000 of the most recent filings; where more history exists, the JSON contains references to additional historical JSON files. ([SEC][1])
+
+---
+
+# 10. Normalize SEC CIK
+
+Store two representations:
+
+```text
+cik_integer = 320193
+
+cik10 =
+0000320193
+```
+
+For Submissions:
+
+```text
+CIK0000320193.json
+```
+
+For Archives path:
+
+```text
+320193
+```
+
+Do not use zero padding inside the `/Archives/edgar/data/{cik}/` directory.
+
+---
+
+# 11. Relevant US annual forms
+
+For the annual-report engine, accept:
+
+```text
+10-K
+20-F
+40-F
+```
+
+Keep amendments separately:
+
+```text
+10-K/A
+20-F/A
+40-F/A
+```
+
+Do not automatically replace the original annual filing with an amendment.
+
+Store:
+
+```text
+is_amendment = true/false
+```
+
+Default canonical selection:
+
+```text
+original filing first
+```
+
+and retain amendment metadata as a linked record.
+
+---
+
+# 12. SEC year assignment
+
+Never assign the report year from `filingDate` alone.
+
+Use:
+
+```text
+reportDate
+```
+
+as the principal fiscal-period indicator.
+
+Example:
+
+```text
+reportDate = 2024-09-28
+filingDate = 2024-11-01
+
+report_year = 2024
+```
+
+For every target company create expected slots:
+
+```text
+2017
+2018
+2019
+2020
+2021
+2022
+2023
+2024
+2025
+```
+
+Then match exactly one canonical annual filing to each fiscal-year slot.
+
+---
+
+# 13. Fields to extract from SEC submission metadata
+
+For every filing retain:
+
+```text
+CIK
+company name
+ticker
+
+form
+accessionNumber
+
+filingDate
+reportDate
+acceptanceDateTime
+
+primaryDocument
+primaryDocDescription
+
+isXBRL
+isInlineXBRL
+```
+
+Preserve raw SEC metadata as JSON as well.
+
+Do not throw it away after normalization.
+
+---
+
+# 14. Build direct SEC Archive URL locally
+
+No extra search request is required.
+
+Given:
+
+```text
+CIK = 320193
+
+accessionNumber =
+0000320193-24-000123
+
+primaryDocument =
+aapl-20240928.htm
+```
+
+calculate:
+
+```python
+cik_path = str(int(cik))
+
+accession_path = accession_number.replace("-", "")
+
+url = (
+    "https://www.sec.gov/Archives/edgar/data/"
+    f"{cik_path}/{accession_path}/{primary_document}"
+)
+```
+
+SEC documents that accepted filings live under the CIK and accession-number directory structure, with the accession dashes removed in that directory. ([SEC][2])
+
+Result pattern:
+
+```text
+https://www.sec.gov/Archives/edgar/data/
+{CIK}/
+{ACCESSION_WITHOUT_DASHES}/
+{PRIMARY_DOCUMENT}
+```
+
+This URL should be generated locally for thousands of rows in milliseconds.
+
+---
+
+# 15. SEC completeness fallback
+
+If target years are missing from the bulk submissions representation:
+
+```text
+bulk metadata
+     ↓
+missing company-year?
+     ↓
+referenced historical submissions JSON
+     ↓
+still missing?
+     ↓
+quarterly EDGAR master indexes
+```
+
+SEC exposes daily and quarterly indexes containing:
+
+```text
+company name
+form type
+CIK
+filing date
+archive filename
+```
+
+([SEC][2])
+
+For 2017–2025 there are only:
+
+```text
+9 years × 4 quarters = 36 quarterly periods
+```
+
+Cache those indexes locally.
+
+After downloading them once:
+
+```text
+all filtering happens locally
+```
+
+---
+
+# 16. SEC high-speed download worker
+
+Create one shared:
+
+```python
+httpx.AsyncClient
+```
+
+with persistent connections.
+
+Suggested configuration:
+
+```python
+limits = httpx.Limits(
+    max_connections=24,
+    max_keepalive_connections=24
+)
+
+timeout = httpx.Timeout(
+    connect=10,
+    read=90,
+    write=30,
+    pool=30
+)
+```
+
+Use streaming:
+
+```text
+request
+↓
+receive chunks
+↓
+write immediately to disk
+```
+
+Recommended chunk:
+
+```text
+256 KB–1 MB
+```
+
+Do not load the whole document into RAM.
+
+---
+
+# 17. SEC queue strategy
+
+Do not process:
+
+```text
+company → year → wait → next
+```
+
+Instead:
+
+```text
+SQL SELECT
+all DISCOVERED records
+        ↓
+priority queue
+        ↓
+async workers
+```
+
+The scheduler should continuously keep workers fed.
+
+Queue size:
+
+```text
+1,000–10,000
+```
+
+is fine because the queue contains metadata, not file bodies.
+
+---
+
+# 18. Retry behavior for SEC
+
+Implement:
+
+```text
+200
+→ stream and validate
+
+301/302
+→ follow redirect
+
+404
+→ NOT_FOUND
+
+408
+→ retry
+
+429
+→ respect Retry-After
+→ reduce sending pressure
+→ retry later
+
+500
+502
+503
+504
+→ exponential retry
+
+403
+→ stop SEC workers temporarily
+→ check headers/rate
+→ do not hammer
+```
+
+Backoff:
+
+```text
+1 sec
+2 sec
+4 sec
+8 sec
+16 sec
+```
+
+plus randomized jitter.
+
+Maximum automatic attempts:
+
+```text
+5
+```
+
+---
+
+# 19. SEC document validation
+
+Remember:
+
+**A canonical SEC annual filing is commonly HTML/iXBRL rather than PDF.**
+
+Therefore support:
+
+```text
+HTML
+XHTML
+TXT
+PDF
+```
+
+Cheap validation first.
+
+HTML:
+
+```text
+HTTP 200
+content length > minimum
+contains <html or <!doctype
+contains expected company/CIK/form markers where practical
+```
+
+PDF:
+
+```text
+starts with %PDF
+PyMuPDF can open
+page_count > 0
+```
+
+Then semantic check:
+
+```text
+expected company
+expected reportDate
+expected form
+```
+
+Do not parse all pages unless necessary.
+
+---
+
+# 20. SEC strict-PDF output mode
+
+If the project requires every final object to be `.pdf`, separate acquisition from conversion:
+
+```text
+SEC canonical HTML
+       ↓
+VERIFIED_SOURCE
+       ↓
+local render queue
+       ↓
+PDF
+```
+
+Do not render while the SEC network worker waits.
+
+Network workers and render workers must be separate pools.
+
+Example:
+
+```text
+24 async network connections
++
+4 local PDF-render workers
+```
+
+Use a persistent Chromium process rather than launching Chrome separately for every report.
+
+Store:
+
+```text
+source_format = HTML
+
+source_url = official SEC URL
+
+converted_pdf = true
+
+conversion_engine =
+chromium
+```
+
+Never label the rendered file as an SEC-supplied PDF.
+
+---
+
+# PART III — UK ENGINE: FCA NSM
+
+## 21. FCA NSM roots
+
+Human search interface:
+
+```text
+https://data.fca.org.uk/#/nsm/nationalstoragemechanism
+```
+
+Public search endpoint used behind the NSM:
+
+```text
+POST
+https://api.data.fca.org.uk/search?index=fca-nsm-searchdata
+```
+
+A UK government procurement response documents this endpoint as public and shows 2,000-record POST searches returning filing metadata including relative download links. ([contractsfinder.service.gov.uk][4])
+
+Treat the API implementation as adapter-specific:
+
+```text
+all request construction
+all schema parsing
+all endpoint constants
+```
+
+must live only inside:
+
+```text
+app/discovery/fca.py
+```
+
+so the adapter can be changed without changing the rest of the application.
+
+---
+
+# 22. FCA large-page discovery
+
+Use metadata pagination.
+
+Base POST structure:
+
+```json
+{
+  "from": 0,
+  "size": 2000,
+  "sort": "publication_date",
+  "keyword": null,
+  "sortorder": "desc",
+  "criteriaObj": {
+    "criteria": []
+  }
+}
+```
+
+For next page:
+
+```text
+from = 2000
+```
+
+then:
+
+```text
+4000
+6000
+8000
+...
+```
+
+Do not retrieve one record at a time.
+
+---
+
+# 23. FCA discovery by date shards
+
+For 2017–2025, divide the initial discovery by date.
+
+Conceptually:
+
+```text
+2017-01-01 → 2017-12-31
+2018-01-01 → 2018-12-31
+...
+2025-01-01 → 2025-12-31
+```
+
+Use the endpoint's date criterion.
+
+The government-published example shows a `publication_date` date criterion in the request body. ([contractsfinder.service.gov.uk][4])
+
+Pattern:
+
+```json
+{
+  "from": 0,
+  "size": 2000,
+  "sort": "publication_date",
+  "keyword": null,
+  "sortorder": "asc",
+  "criteriaObj": {
+    "criteria": [],
+    "dateCriteria": [
+      {
+        "name": "publication_date",
+        "value": {
+          "from": "2024-01-01T00:00:00Z",
+          "to": "2024-12-31T23:59:59Z"
+        }
+      }
+    ]
+  }
+}
+```
+
+If the current API schema uses a slightly different casing or envelope, inspect one successful current NSM browser request and update only the FCA adapter.
+
+Do not redesign the pipeline.
+
+---
+
+# 24. FCA LEI filtering
+
+Use LEI whenever the company universe contains one.
+
+Government documentation shows the NSM search backend accepting an LEI criterion like:
+
+```json
+{
+  "name": "lei",
+  "value": ["2138001YYBULX5SZ2H24"]
+}
+```
+
+([contractsfinder.service.gov.uk][4])
+
+Prefer:
+
+```text
+LEI
+```
+
+over fuzzy company-name matching.
+
+Maintain:
+
+```text
+company_name
+LEI
+aliases
+```
+
+in the company table.
+
+---
+
+# 25. FCA Annual Financial Report filter
+
+The desired NSM category is:
+
+```text
+Annual Financial Report
+```
+
+The FCA user guide explicitly shows this category in NSM results. ([FCA][5])
+
+If the current API response supports a stable category criterion, filter server-side.
+
+Otherwise:
+
+```text
+retrieve metadata in large pages
+        ↓
+local filter:
+category == "Annual Financial Report"
+```
+
+Do not risk losing reports by guessing undocumented filter names.
+
+Metadata is cheap.
+
+Wrongly excluding a report is expensive.
+
+---
+
+# 26. FCA bulk CSV fallback
+
+The FCA search interface can export up to:
+
+```text
+4,000 records
+```
+
+per export.
+
+The resulting CSV includes:
+
+```text
+all search columns
++
+a download link for each record
+```
+
+according to the current FCA NSM guide. ([FCA][5])
+
+Therefore implement an alternate ingestion command:
+
+```text
+python -m app.cli import-fca-csv file.csv
+```
+
+The importer must:
+
+```text
+read CSV
+normalize column names
+extract LEI
+company
+description
+category
+publication date
+download URL
+insert/upsert into manifest.sqlite
+```
+
+This allows a complete metadata manifest to be created without rediscovering documents.
+
+---
+
+# 27. FCA historic 2017–2020 support
+
+Download once:
+
+```text
+https://data.fca.org.uk/artefacts/NSM/data-migration/
+MS_to_FCA_NSM_Document_URL_Mapping.zip
+```
+
+The current FCA guide says this ZIP contains spreadsheets by year from **2009 through 2020**, mapping old Morningstar NSM URLs to their corresponding FCA NSM locations. ([FCA][5])
+
+Store:
+
+```text
+cache/fca/
+MS_to_FCA_NSM_Document_URL_Mapping.zip
+```
+
+Unpack once.
+
+Import mappings into:
+
+```sql
+fca_historic_url_map
+```
+
+with fields:
+
+```text
+year
+old_nsm_url
+filename
+fca_url
+```
+
+Use this mapping as the historical URL resolver when a 2017–early-2020 record points to the old NSM.
+
+---
+
+# 28. FCA download-link normalization
+
+API or CSV records may return:
+
+```text
+absolute URL
+```
+
+or:
+
+```text
+relative path
+```
+
+Normalize with:
+
+```python
+from urllib.parse import urljoin
+
+url = urljoin(
+    "https://data.fca.org.uk/",
+    download_link
+)
+```
+
+Store both:
+
+```text
+raw_download_link
+normalized_download_url
+```
+
+---
+
+# 29. FCA year assignment
+
+Do not blindly use:
+
+```text
+publication year
+```
+
+as annual-report year.
+
+Example:
+
+```text
+published March 2024
+```
+
+may represent:
+
+```text
+financial year ended December 2023
+```
+
+Use this hierarchy:
+
+```text
+1. Explicit accounting reference date / fiscal-year-end metadata
+2. Structured report package filename/date
+3. Report description
+4. First pages of document
+5. Publication year only as a temporary unresolved value
+```
+
+Store:
+
+```text
+publication_year
+```
+
+and:
+
+```text
+report_year
+```
+
+separately.
+
+Never silently treat them as the same field.
+
+---
+
+# 30. FCA structured AFR files
+
+The NSM may contain tagged Annual Financial Reports.
+
+The FCA currently permits the user to download the **original filing**, and for tagged reports also offers xBRL-JSON and xBRL-CSV representations. 
+
+For this project always preserve:
+
+```text
+ORIGINAL FILING
+```
+
+as the canonical source object.
+
+Possible original formats include:
+
+```text
+PDF
+XHTML
+ZIP/ESEF reporting package
+HTML
+```
+
+Store exact MIME type and extension.
+
+---
+
+# 31. FCA download concurrency
+
+Unlike SEC, do not hard-code an invented public request-per-second limit.
+
+Use adaptive concurrency.
+
+Initial:
+
+```text
+4 simultaneous document downloads
+```
+
+After a stable warm-up:
+
+```text
+8
+```
+
+Potential maximum:
+
+```text
+16
+```
+
+only when:
+
+```text
+no 429 responses
+low error rate
+stable latency
+stable server responses
+```
+
+Implement additive increase / multiplicative decrease:
+
+```text
+healthy 60 sec
+→ concurrency +1
+
+429
+→ concurrency × 0.5
+
+repeated 503
+→ concurrency × 0.5
+```
+
+Minimum:
+
+```text
+1
+```
+
+Maximum configured:
+
+```text
+16
+```
+
+Do not use proxies or IP rotation to evade source throttling.
+
+---
+
+# 32. FCA download workers
+
+Use a separate client/pool from SEC.
+
+Example:
+
+```python
+FCA_MAX_CONNECTIONS = 16
+FCA_MAX_KEEPALIVE = 16
+```
+
+Stream directly to disk.
+
+Never parse PDF bodies inside the network coroutine.
+
+Pipeline:
+
+```text
+download coroutine
+     ↓
+disk
+     ↓
+database DOWNLOADED
+     ↓
+validation queue
+```
+
+This allows network workers to immediately fetch another report.
+
+---
+
+# PART IV — VALIDATION ENGINE
+
+## 33. Fast validation levels
+
+Apply checks in this exact order:
+
+```text
+LEVEL 1
+HTTP success
+
+LEVEL 2
+content type
+
+LEVEL 3
+magic bytes
+
+LEVEL 4
+size sanity
+
+LEVEL 5
+parser opens document
+
+LEVEL 6
+first pages only
+
+LEVEL 7
+company/year semantic verification
+```
+
+Do not extract 200 pages merely to verify a download.
+
+---
+
+# 34. PDF verification
+
+Check:
+
+```python
+first_bytes.startswith(b"%PDF")
+```
+
+Then PyMuPDF:
+
+```text
+open succeeds
+page_count >= 1
+```
+
+Reject:
+
+```text
+HTML error pages saved as .pdf
+zero-byte files
+Cloudflare/error response
+truncated PDF
+```
+
+---
+
+# 35. Semantic annual-report verification
+
+Extract:
+
+```text
+first 3–5 pages
+```
+
+Search for:
+
+```text
+company name
+known aliases
+annual report
+annual financial report
+report and accounts
+financial year ended
+expected year
+```
+
+Do not require every phrase.
+
+Use a weighted rule.
+
+Example:
+
+```text
+company match       +4
+year match          +3
+annual-report term  +2
+auditor term        +1
+```
+
+If score high:
+
+```text
+VERIFIED
+```
+
+If ambiguous:
+
+```text
+MANUAL_REVIEW
+```
+
+---
+
+# 36. Hash every object
+
+Calculate:
+
+```text
+SHA-256
+```
+
+during streaming if possible.
+
+Do not reread a multi-megabyte file unnecessarily.
+
+Pseudo-flow:
+
+```python
+sha = hashlib.sha256()
+
+while chunk:
+    file.write(chunk)
+    sha.update(chunk)
+
+digest = sha.hexdigest()
+```
+
+Create a database index on:
+
+```text
+sha256
+```
+
+If hash already exists:
+
+```text
+DUPLICATE
+```
+
+Keep the new source URL as provenance even if only one physical file is retained.
+
+---
+
+# PART V — FILE NAMING
+
+## 37. Canonical naming
+
+Use:
+
+```text
+COUNTRY_TICKER_OR_ID_YEAR_AR.ext
+```
+
+Examples:
+
+```text
+US_AAPL_2024_AR.html
+
+US_MSFT_2023_AR.html
+
+UK_TSCO_2024_AR.pdf
+
+UK_ULVR_2023_AR.zip
+```
+
+If ticker unavailable:
+
+```text
+UK_{LEI}_{YEAR}_AR.pdf
+```
+
+Sanitize illegal Windows filename characters.
+
+---
+
+# 38. Storage sharding
+
+For moderate scale:
+
+```text
+reports/
+├── US/
+│   ├── 2017/
+│   ├── 2018/
+│   ...
+│   └── 2025/
+│
+└── UK/
+    ├── 2017/
+    ...
+    └── 2025/
+```
+
+For hundreds of thousands of objects optionally add:
+
+```text
+00
+01
+02
+...
+FF
+```
+
+hash shards below each year.
+
+---
+
+# PART VI — MAXIMUM-THROUGHPUT PIPELINE
+
+## 39. Separate all stages
+
+The application should operate as independent pipelines:
+
+```text
+DISCOVERY
+
+SEC metadata ───┐
+                ├──> SQLite
+FCA metadata ───┘
+
+
+NETWORK
+
+SQLite
+  ↓
+scheduler
+  ↓
+download workers
+  ↓
+SSD
+
+
+CPU
+
+SSD
+ ↓
+validator workers
+ ↓
+hash
+ ↓
+semantic check
+ ↓
+VERIFIED
+
+
+OPTIONAL
+
+HTML/XHTML
+ ↓
+local renderer
+ ↓
+PDF
+```
+
+Network downloading must never wait for:
+
+```text
+OCR
+full-document NLP
+PDF rendering
+cloud upload
+```
+
+---
+
+# 40. Use local SSD as landing zone
+
+Always:
+
+```text
+Internet
+   ↓
+local staging SSD
+   ↓
+validate
+   ↓
+final local folder
+```
+
+Only afterward:
+
+```text
+optional Google Drive/cloud sync
+```
+
+Do not download directly into a mounted Drive folder during the benchmark.
+
+---
+
+# 41. Database writes
+
+SQLite:
+
+```sql
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA temp_store=MEMORY;
+```
+
+Do not commit separately after every 50 KB network chunk.
+
+Batch metadata updates.
+
+For example:
+
+```text
+commit every 50–200 completed records
+```
+
+except status transitions required for crash safety.
+
+---
+
+# 42. Priority scheduler
+
+Order jobs roughly by:
+
+```text
+priority 1
+small known direct objects
+
+priority 2
+normal direct documents
+
+priority 3
+large documents
+
+priority 4
+fallback/resolution tasks
+```
+
+For a live demonstration, process known direct documents first so throughput becomes visible immediately.
+
+Production completeness must eventually process every queue item.
+
+---
+
+# 43. Do not HEAD every file automatically
+
+A common performance mistake is:
+
+```text
+HEAD
+↓
+GET
+```
+
+which doubles network requests.
+
+Prefer:
+
+```text
+GET with streaming
+```
+
+and inspect the returned headers.
+
+Use HEAD only when there is a specific reason.
+
+This is especially important for SEC because every request consumes part of the request-rate budget.
+
+---
+
+# 44. Keep connections alive
+
+Never create a new HTTP client for every document.
+
+Create:
+
+```text
+one SEC AsyncClient
+one FCA AsyncClient
+```
+
+and keep them alive for the entire run.
+
+Benefit:
+
+```text
+fewer TCP handshakes
+fewer TLS handshakes
+lower latency
+higher throughput
+```
+
+---
+
+# 45. Compression
+
+For metadata:
+
+```text
+Accept-Encoding:
+gzip, deflate
+```
+
+For already-compressed PDF/ZIP documents, compression normally provides little benefit.
+
+Do not decompress network data into RAM unnecessarily.
+
+---
+
+# PART VII — LIVE BENCHMARK MODE
+
+## 46. Required CLI
+
+Implement:
+
+```text
+python -m app.cli discover --country US --years 2017:2025
+
+python -m app.cli discover --country UK --years 2017:2025
+
+python -m app.cli download --country BOTH
+
+python -m app.cli benchmark --country BOTH --limit 200
+```
+
+Also:
+
+```text
+python -m app.cli status
+```
+
+---
+
+# 47. Demo benchmark behavior
+
+The benchmark command should select:
+
+```text
+100–500 already-discovered
+not-yet-downloaded documents
+```
+
+Then show live metrics.
+
+Example screen:
+
+```text
+ANNUAL REPORT INGESTION ENGINE
+────────────────────────────────────────────
+
+Target                 US + UK
+Years                   2017–2025
+Selected                      200
+
+SEC workers                    24
+SEC request rate             8.8/s
+
+FCA concurrency                 8
+
+Completed                    118
+Verified                     116
+Retrying                       2
+Failed                         0
+
+Transferred               483.7 MB
+Elapsed                     21.8 s
+
+Documents/sec                5.41
+Documents/min                 325
+
+Network throughput          22.2 MB/s
+
+████████████████░░░░░░░░ 59%
+```
+
+Update once per second.
+
+Do not print one terminal line for every network chunk.
+
+---
+
+# 48. Benchmark table
+
+After completion store:
+
+```text
+started_at
+finished_at
+
+source
+document_count
+
+success_count
+failed_count
+
+bytes
+
+elapsed_seconds
+
+documents_per_second
+documents_per_minute
+
+MB_per_second
+
+p50_latency
+p95_latency
+p99_latency
+
+429_count
+5xx_count
+retry_count
+```
+
+Save to:
+
+```text
+benchmark_runs
+```
+
+and export:
+
+```text
+benchmark.csv
+```
+
+---
+
+# 49. Pre-presentation warm-up
+
+Before a demonstration:
+
+```text
+1. Run discovery in advance.
+2. Build complete manifest.
+3. Validate company mappings.
+4. Confirm 200+ pending direct URLs.
+5. Clear only benchmark output files.
+6. Keep metadata cached.
+7. Test internet connection.
+8. Ensure sufficient SSD free space.
+9. Run a 20-document smoke test.
+10. Run the actual 100/200-document benchmark.
+```
+
+The live demo should showcase:
+
+```text
+mass downloading
+```
+
+not waste time rediscovering metadata already obtainable in bulk.
+
+---
+
+# PART VIII — CORRECTNESS RULES
+
+## 50. One report per fiscal year
+
+Required key:
+
+```text
+company_id
++
+report_year
++
+report_type
+```
+
+For the main annual report:
+
+```text
+report_type = AR
+```
+
+There should normally be one canonical record.
+
+If there are multiple candidates:
+
+```text
+canonical
+amendment
+duplicate
+corrected
+alternative format
+```
+
+must be explicit.
+
+---
+
+# 51. Never invent missing reports
+
+If no report can be verified:
+
+```text
+NOT_FOUND
+```
+
+Do not:
+
+```text
+guess URL
+guess year
+copy adjacent year
+invent document identifier
+```
+
+---
+
+# 52. Preserve provenance
+
+Every physical report must remain traceable to:
+
+```text
+country
+source
+company
+CIK/LEI
+report year
+filing/publication date
+accession/document identifier
+original URL
+retrieval timestamp
+SHA-256
+```
+
+A final PDF without provenance is incomplete data.
+
+---
+
+# PART IX — FAILURE RECOVERY
+
+## 53. Internet dies
+
+Do nothing special.
+
+When connectivity returns:
+
+```text
+RETRY queue resumes
+```
+
+---
+
+# 54. PC crashes
+
+At restart:
+
+```text
+DOWNLOADING → RETRY
+```
+
+Existing valid final files remain untouched.
+
+`.part` files may either:
+
+```text
+resume if supported
+```
+
+or:
+
+```text
+delete and restart
+```
+
+depending on server Range support.
+
+---
+
+# 55. Rate limiting
+
+SEC:
+
+```text
+never raise the configured request rate above the permitted ceiling
+```
+
+FCA:
+
+```text
+reduce concurrency automatically
+```
+
+Never respond to throttling by opening more machines, more proxies, or rotating IPs.
+
+---
+
+# 56. Duplicate reports
+
+If:
+
+```text
+SHA256 A == SHA256 B
+```
+
+do not waste storage.
+
+Maintain both database source records pointing to the same canonical physical object.
+
+---
+
+# PART X — AGENT IMPLEMENTATION ORDER
+
+Implement in this exact order.
+
+### Stage 1
+
+```text
+SQLite schema
+status machine
+configuration
+logging
+```
+
+### Stage 2
+
+```text
+SEC bulk submissions downloader
+SEC parser
+SEC report-year matching
+SEC Archive URL generator
+```
+
+### Stage 3
+
+```text
+SEC async downloader
+8.8 req/s token bucket
+streaming
+retries
+```
+
+### Stage 4
+
+```text
+basic HTML/PDF validation
+SHA-256
+```
+
+### Stage 5
+
+```text
+FCA API discovery adapter
+2,000-record pagination
+LEI/date filtering
+Annual Financial Report filtering
+```
+
+### Stage 6
+
+```text
+FCA CSV importer
+historic mapping ZIP importer
+URL resolver
+```
+
+### Stage 7
+
+```text
+FCA adaptive async downloader
+```
+
+### Stage 8
+
+```text
+semantic company/year verification
+```
+
+### Stage 9
+
+```text
+benchmark mode
+Rich terminal dashboard
+CSV statistics export
+```
+
+### Stage 10
+
+```text
+optional HTML/XHTML → PDF renderer
+```
+
+Do not implement cloud sync until the complete local pipeline works.
+
+---
+
+# PART XI — PERFORMANCE TARGETS
+
+The engine should optimize for:
+
+```text
+DISCOVERY:
+thousands of metadata records/sec locally
+
+QUEUE CREATION:
+effectively instantaneous for normal datasets
+
+SEC:
+~8.5–9 network requests/sec maximum operating target
+
+FCA:
+adaptive parallel downloading based on observed server behavior
+
+VALIDATION:
+multiple files simultaneously
+
+HASHING:
+performed while streaming whenever possible
+
+DATABASE:
+batched writes
+
+STORAGE:
+local SSD
+```
+
+Do not define performance by one file's latency.
+
+Define it by:
+
+```text
+verified documents/minute
++
+MB/sec
++
+failure rate
++
+completeness
+```
+
+---
+
+# PART XII — FINAL PIPELINE
+
+The finished system must behave like:
+
+```text
+                 COMPANY UNIVERSE
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+         USA                        UK
+          │                         │
+          ▼                         ▼
+ SEC submissions.zip          FCA NSM API
+ + quarterly indexes          + CSV export
+          │                   + historic map
+          │                         │
+          ▼                         ▼
+     Normalize                  Normalize
+          │                         │
+          └────────────┬────────────┘
+                       ▼
+                MANIFEST.SQLITE
+                       │
+                       ▼
+                  JOB SCHEDULER
+                       │
+           ┌───────────┴───────────┐
+           │                       │
+           ▼                       ▼
+       SEC pool                 FCA pool
+       8.8 r/s                 adaptive
+           │                       │
+           └───────────┬───────────┘
+                       ▼
+                   staging/
+                       │
+                       ▼
+                  validation
+                       │
+                ┌──────┴───────┐
+                │              │
+             VALID           RETRY
+                │              │
+                ▼              └──→ scheduler
+             SHA-256
+                │
+                ▼
+           final storage
+                │
+                ▼
+             SQLite
+                │
+                ▼
+        completeness report
+```
+
+---
+
+# Definition of Done
+
+The implementation is complete only when the following command can run unattended:
+
+```text
+
+python -m app.cli run \
+  --countries US UK \
+  --years 2017:2025
+```
+
+and after interruption can be run again without duplicating successful work.
+
+At completion it must report:
+
+```text
+Expected company-years
+Discovered
+Downloaded
+Verified
+Missing
+Duplicate
+Retrying
+Manual review
+Total bytes
+Elapsed time
+Documents/minute
+MB/sec
+Completion %
+```
+

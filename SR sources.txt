@@ -1,0 +1,706 @@
+I did a proper production-style test across **4 companies and multiple report generations**:
+
+* **US:** Microsoft, Coca-Cola
+* **UK:** BP, Shell
+
+I tested dedicated sustainability repositories, official corporate archives/CDNs, report-year continuity, direct-PDF behavior, report-type changes, and whether the architecture can realistically support **hundreds of documents with minimal HTTP overhead**.
+
+## Result
+
+For your exact requirement—**US + UK, 2017–2025, sustainability/ESG/CSR reports, maximum speed**—I would build around:
+
+| Rank | Source                                      | Production role                                                    |
+| ---- | ------------------------------------------- | ------------------------------------------------------------------ |
+| 🥇   | **SustainabilityReports.com Bulk Portal**   | Mass discovery + **bulk PDF ZIP download**                         |
+| 🥈   | **Official corporate report archives/CDNs** | Authoritative direct-PDF fallback                                  |
+| 🥉   | **Corporate Register CR Data Packages**     | Bulk metadata/completeness cross-check                             |
+| 4    | ResponsibilityReports.com                   | Useful PDF mirror/fallback, not my primary mass-ingestion backbone |
+
+### 1. SustainabilityReports.com Bulk Portal is the closest thing to “speed of light”
+
+This is fundamentally different from scraping.
+
+Their current database advertises **470,000+ reports, 62,000+ companies, 170+ countries and 160+ markets**, updated weekly. ([SustainabilityReports.com][1])
+
+More importantly, their professional portal explicitly supports:
+
+```text
+country = United States / United Kingdom
+years = 2017–2025
+report type = Sustainability / ESG / CSR / Integrated
+language = English
+        ↓
+select hundreds/thousands
+        ↓
+ONE BULK DOWNLOAD
+        ↓
+ZIP
++
+metadata
+```
+
+Their portal calls this **“Instant Bulk Download”**, with advanced filtering and custom report selections. ([SustainabilityReports.com][2])
+
+That is the only source I tested where the intended architecture itself is:
+
+> **many PDFs → one/few bulk download objects**
+
+rather than:
+
+> 500 PDFs → 500 separate GET requests.
+
+That matters enormously.
+
+If 500 reports become one ZIP:
+
+```text
+500 reports
+      ↓
+1 ZIP request
+      ↓
+local SSD
+      ↓
+parallel unzip
+      ↓
+500 PDFs
+```
+
+Your bottleneck becomes mostly **bytes/sec**, not HTTP-request latency.
+
+Their terms explicitly prohibit unauthorized automated bulk downloading from the normal site, so production use should go through the authorized bulk service/portal. ([SustainabilityReports.com][3])
+
+---
+
+# The four-company test
+
+## 🇺🇸 Microsoft
+
+Microsoft's official Reports Hub is extremely well structured.
+
+It currently exposes archived sustainability-related reporting including:
+
+* Environmental Sustainability Reports for 2020, 2021, 2022, 2024, 2025 and 2026.
+* CSR / Impact reporting continuously from **2017 through 2025**. ([Microsoft][4])
+
+I also followed actual archive links.
+
+### 2019 test
+
+The 2019 CSR link resolves directly to:
+
+```text
+cdn-dynmedia-1.microsoft.com/
+...
+Microsoft-2019-CSR-Annual-Report-0.pdf
+```
+
+It is a real **40-page PDF**, not a redirect/search wrapper. ([Microsoft][5])
+
+The report itself includes environmental sustainability as part of the CSR disclosure. ([Microsoft][5])
+
+### 2018 test
+
+Same pattern:
+
+```text
+cdn-dynmedia-1.microsoft.com/
+...
+2018-Microsoft-CSR-Report-Highlights-0.pdf
+```
+
+again a directly accessible PDF. 
+
+### Microsoft finding
+
+The naming/type evolves:
+
+```text
+2017 ─┐
+2018  │
+2019  ├─ Corporate Social Responsibility
+2020 ─┘
+
+2021+
+    ↓
+Impact Summary
++
+Environmental Sustainability Report
+```
+
+So your crawler **cannot insist that the filename contains `sustainability-report`**.
+
+Normalize:
+
+```text
+CSR
+Impact Report
+Environmental Sustainability Report
+ESG Report
+
+        ↓
+
+SR_SLOT
+```
+
+depending on your project's rules.
+
+The SustainabilityReports database also has a Microsoft company record spanning **2017–2025**, with multiple reports in many years. ([SustainabilityReports.com][6])
+
+---
+
+# 🇺🇸 Coca-Cola
+
+This was an especially useful test because it proves report formats change.
+
+### 2018
+
+Coca-Cola published a proper:
+
+**2018 Business & Sustainability Report**
+
+and the official company CDN exposes the PDF directly. ([Coca-Cola Company][7])
+
+### 2021
+
+The report evolved into:
+
+**Business and ESG Report**
+
+The sustainability repository identifies it as an integrated report, **86 pages / ~26.13 MB**. ([SustainabilityReports.com][8])
+
+### 2022
+
+Coca-Cola then published a:
+
+**2022 Business & Sustainability Report**
+
+and the official corporate site exposes its PDF directly. ([Coca-Cola Company][9])
+
+### 2023–2025
+
+The company's reporting structure changes again.
+
+Its current official sustainability page exposes:
+
+```text
+2023 Environmental Update
+
+2024 Environmental Update
+2024 Portfolio Update
+2024 People & Communities Update
+
+2025 Environmental Update
+2025 Portfolio Update
+2025 People & Communities Update
+```
+
+rather than necessarily one monolithic sustainability report. ([Coca-Cola Company][10])
+
+I followed those links too.
+
+The **2023 Environmental Update** is a direct **12-page PDF**. ([Coca-Cola Company][11])
+
+The **2024 Environmental Update** is a direct **14-page PDF**. ([Coca-Cola Company][12])
+
+This is exactly why production collection requires a classification engine.
+
+For Coca-Cola:
+
+```text
+2018
+Business & Sustainability
+
+2019/2020
+business/sustainability-family disclosures
+
+2021
+Business & ESG
+
+2022
+Business & Sustainability
+
+2023+
+Environmental / Portfolio / People updates
+```
+
+If your research definition says:
+
+> one standalone sustainability report per company-year
+
+then some newer Coca-Cola years may legitimately be:
+
+```text
+NO_SINGLE_STANDALONE_SR
+```
+
+rather than forcing one of the updates into the slot.
+
+Interestingly, SustainabilityReports.com currently has **31 Coca-Cola reports**, but its year coverage is not identical to the company's live site—for example its company index lists 2024 and 2022 but does not show 2023 as a company-year button, whereas Coca-Cola's own site clearly has a 2023 Environmental Update. ([SustainabilityReports.com][13])
+
+**Important production lesson:** aggregator first, official fallback second.
+
+---
+
+# 🇬🇧 BP
+
+BP is almost the ideal sustainability-report test subject.
+
+The official BP CDN uses a remarkably consistent structure:
+
+```text
+bp.com/content/dam/bp/
+business-sites/en/global/corporate/pdfs/
+sustainability/group-reports/
+```
+
+For example:
+
+```text
+bp-sustainability-report-2020.pdf
+bp-sustainability-report-2021.pdf
+bp-sustainability-report-2022.pdf
+...
+```
+
+I verified the official **2020 Sustainability Report** directly from BP's infrastructure. ([BP][14])
+
+Another BP document explicitly references the official 2021 report as:
+
+```text
+.../group-reports/
+bp-sustainability-report-2021.pdf
+```
+
+([BP][15])
+
+And BP documentation references the 2022 report with the same pattern:
+
+```text
+bp-sustainability-report-2022.pdf
+```
+
+([BP][16])
+
+The **2024 Sustainability Report** is also directly hosted on BP's CDN. ([BP][17])
+
+### Third-party archive test
+
+ResponsibilityReports also exposes BP reports using predictable direct URLs:
+
+```text
+/HostedData/ResponsibilityReportArchive/
+b/LSE_BP_2022.pdf
+
+b/LSE_BP_2023.pdf
+```
+
+I verified both PDFs. ([Responsibility Reports][18])
+
+Meanwhile SustainabilityReports.com's BP record currently contains roughly **50 reports** with report records for every year **2017 through 2025**. ([SustainabilityReports.com][19])
+
+### BP result
+
+This is exceptionally crawler-friendly after discovery:
+
+```text
+BP
++
+year
++
+stable CDN directory
++
+predictable filename
+```
+
+Once the URL template is established, thousands of URL candidates can be generated locally without web searches.
+
+---
+
+# 🇬🇧 Shell
+
+Shell was equally informative.
+
+The official Shell reporting archive explicitly exposes year navigation covering:
+
+```text
+2017
+2018
+2019
+2020
+2021
+2022
+2023
+2024
+2025
+```
+
+([Shell][20])
+
+I verified an official direct Shell PDF for:
+
+### 2019
+
+```text
+shell-sustainability-report-2019.pdf
+```
+
+([Shell][21])
+
+### 2023
+
+The official report resolves as:
+
+```text
+reports.shell.com/
+sustainability-report/2023/
+_assets/downloads/
+shell-sustainability-report-2023.pdf
+```
+
+([Shell Reports][22])
+
+ResponsibilityReports also has a direct 2022 Shell PDF archive. ([Responsibility Reports][23])
+
+SustainabilityReports.com's Shell record spans **1998–2025**, including every requested year from 2017 onward. ([SustainabilityReports.com][24])
+
+But there is a crucial transition.
+
+Shell announced in March 2024 that the **2023 Sustainability Report** covered its 2023 sustainability performance, and explicitly stated that **from the following year its sustainability reporting would be integrated with the Shell Annual Report and Accounts**. ([Shell][25])
+
+Therefore:
+
+```text
+Shell 2017–2023
+    ↓
+standalone Sustainability Reports
+
+Shell 2024 onward
+    ↓
+sustainability integrated into Annual Report
+```
+
+That distinction should be stored in the database rather than pretending a standalone SR exists.
+
+---
+
+# What the testing tells us about raw speed
+
+There are two completely different ingestion models.
+
+## Model A — individual website crawling
+
+Suppose:
+
+```text
+500 reports
+```
+
+You need approximately:
+
+```text
+500 GET requests
+```
+
+Even with 50–100 concurrent connections:
+
+```text
+DNS
+TLS
+HTTP latency
+server throttling
+redirects
+file-transfer time
+```
+
+remain involved.
+
+You can make it fast, but **“hundreds in a few seconds” cannot be guaranteed.**
+
+---
+
+# Model B — bulk archive delivery
+
+This is what you want.
+
+```text
+500 reports
+       ↓
+bulk server
+       ↓
+1–few ZIPs
+       ↓
+SSD
+       ↓
+unzip locally
+```
+
+Now:
+
+```text
+HTTP request overhead ≈ almost irrelevant
+
+speed ≈ ZIP size / bandwidth
+```
+
+This is why **SustainabilityReports.com's authorized bulk service** is the strongest match to your requirement. It explicitly offers bulk PDF delivery rather than forcing you to engineer mass scraping yourself. ([SustainabilityReports.com][26])
+
+---
+
+# Another serious production source: Corporate Register
+
+I also tested the current Corporate Register offering.
+
+It specializes in non-financial reports including:
+
+```text
+CSR
+Sustainability
+ESG
+Environment
+Human Rights
+Climate
+SASB
+TCFD
+Integrated reporting
+```
+
+and says it generally prefers PDFs because they are searchable and archivable. ([Corporate Register][27])
+
+For serious research it offers **CR Data Packages** rather than expecting systematic users to hammer its normal web search.
+
+You can literally send it:
+
+```text
+YOUR COMPANY UNIVERSE
+      ↓
+ISIN / CIK
+      ↓
+they match companies
+      ↓
+report types
+      ↓
+years
+      ↓
+dataset spreadsheet
+```
+
+Corporate Register states that its team can import a spreadsheet of your organisations, match identifiers such as **ISINs and CIKs**, identify report types and years, and return/refine datasets. ([Corporate Register][28])
+
+So I would use it for:
+
+```text
+completeness auditing
++
+metadata discovery
++
+missing-report identification
+```
+
+rather than necessarily as your fastest byte-delivery CDN.
+
+---
+
+# My production architecture after this test
+
+For your **2017–2025 US + UK sustainability project**:
+
+```text
+                       COMPANY UNIVERSE
+                              │
+                              ▼
+                SustainabilityReports.com
+                    BULK METADATA/FILTER
+                              │
+              US + UK / English / 2017–25
+                              │
+                              ▼
+                       REPORT MANIFEST
+                              │
+               ┌──────────────┴───────────────┐
+               │                              │
+         BULK PDF AVAILABLE              MISSING/AMBIGUOUS
+               │                              │
+               ▼                              ▼
+          ZIP DOWNLOAD                 OFFICIAL COMPANY
+               │                       REPORT ARCHIVE
+               │                              │
+               │                 ┌────────────┼───────────┐
+               │                 ↓            ↓           ↓
+               │              Microsoft    BP/Shell    Coca-Cola
+               │                CDN          CDN           DAM
+               │                 │            │            │
+               └─────────────────┴────────────┴────────────┘
+                                      │
+                                      ▼
+                                 LOCAL SSD
+                                      │
+                                      ▼
+                                   SHA256
+                                      │
+                                      ▼
+                                  PDF VERIFY
+                                      │
+                                      ▼
+                            REPORT TYPE CLASSIFIER
+                                      │
+                    ┌─────────────────┼────────────────┐
+                    ▼                 ▼                ▼
+                    SR                IR               OTHER
+             standalone           integrated         climate/
+           sustainability                           ESG update
+                                      │
+                                      ▼
+                              company + year
+                                  database
+```
+
+## For maximum speed
+
+Do **not** do this:
+
+```text
+company
+→ Google
+→ open website
+→ search sustainability
+→ click report
+→ download
+→ next company
+```
+
+Do:
+
+```text
+STEP 1
+Get entire metadata universe.
+
+STEP 2
+Resolve every target URL before downloading anything.
+
+STEP 3
+Manifest contains:
+100,000 URLs.
+
+STEP 4
+Use bulk ZIP where available.
+
+STEP 5
+For official-CDN leftovers:
+100 global async connections
+but only 2–5 per host.
+
+STEP 6
+Stream directly to SSD.
+
+STEP 7
+Validate/hash in parallel.
+```
+
+---
+
+# The URL behavior I actually observed
+
+This is especially encouraging.
+
+Microsoft:
+
+```text
+cdn-dynmedia-1.microsoft.com/is/content/...
+```
+
+Coca-Cola:
+
+```text
+coca-colacompany.com/content/dam/
+corporate/us/en/reports/...
+```
+
+BP:
+
+```text
+bp.com/content/dam/bp/
+business-sites/en/global/corporate/
+pdfs/sustainability/group-reports/...
+```
+
+Shell:
+
+```text
+reports.shell.com/
+sustainability-report/{YEAR}/
+_assets/downloads/...
+```
+
+These are static/CDN-style document locations rather than browser-only applications. ([Microsoft][5])
+
+That is exactly what we want after discovery.
+
+---
+
+# Final production verdict
+
+For **hundreds/thousands of reports**:
+
+**Primary:** **SustainabilityReports.com authorized Bulk Portal**
+
+Use filters and receive **bulk ZIP + metadata**. This minimizes network transactions and is therefore the architecture with the highest theoretical throughput. ([SustainabilityReports.com][26])
+
+**Authoritative fallback:** **official company sustainability archives/CDNs**.
+
+The four-company test proved that Microsoft, Coca-Cola, BP and Shell all expose real report files through static corporate/CDN infrastructure, but report names and report types change over time. ([Microsoft][4])
+
+**Completeness auditor:** **Corporate Register CR Data Package**.
+
+It is designed for intensive professional datasets and can match an externally supplied universe using identifiers such as CIK/ISIN and return report-type/year metadata. ([Corporate Register][28])
+
+The most important finding from the heavy test is that **speed is no longer the difficult part once URLs are resolved**. The difficult part is accurately determining whether each company-year contains a standalone SR, CSR/ESG report, integrated report, or only topic-specific disclosures. For your project, the agent should therefore build the entire **2017–2025 URL manifest first**, then the actual download stage can be extremely aggressive and simple.
+
+[1]: https://www.sustainabilityreports.com/?trk=article-ssr-frontend-pulse_little-text-block&utm_source=chatgpt.com "Sustainability Reports Database | 470,000+ Free ESG & CSR Reports"
+[2]: https://portal.sustainabilityreports.com/?utm_source=chatgpt.com "Download Portal | SustainabilityReports.com"
+[3]: https://www.sustainabilityreports.com/terms?utm_source=chatgpt.com "Terms of Use | SustainabilityReports.com Legal Terms & Conditions"
+[4]: https://www.microsoft.com/en-us/corporate-responsibility/reports-hub "Reports Hub | Microsoft CSR"
+[5]: https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/msc/documents/presentations/CSR/Microsoft-2019-CSR-Annual-Report-0.pdf "Corporate Social Responsibility Report"
+[6]: https://www.sustainabilityreports.com/microsoft?utm_source=chatgpt.com "Microsoft Corp Sustainability Reports (1994-2026)"
+[7]: https://www.coca-colacompany.com/content/dam/company/us/en/reports/pdf/coca-cola-business-and-sustainability-report-2018.pdf?utm_source=chatgpt.com "2018 Business & Sustainability Report"
+[8]: https://www.sustainabilityreports.com/coca-cola/2021/esg-report?utm_source=chatgpt.com "Coca-Cola Co 2021 Integrated Report - Free PDF"
+[9]: https://www.coca-colacompany.com/content/dam/corporate/us/en/reports/coca-cola-business-sustainability-report-2022.pdf?utm_source=chatgpt.com "The Coca-Cola Company 2022 Business & Sustainability Report"
+[10]: https://www.coca-colacompany.com/policies-and-practices/sustainability "Sustainability - Policies, Practices & Reports"
+[11]: https://www.coca-colacompany.com/content/dam/corporate/us/en/reports/2023-environmental-update/2023-environmental-update.pdf "The Coca-Cola Company 2023 Environmental Update"
+[12]: https://www.coca-colacompany.com/content/dam/corporate/us/en/reports/2024-environmental-update/2024-environmental-update.pdf "2024 Environmental Update"
+[13]: https://www.sustainabilityreports.com/coca-cola?utm_source=chatgpt.com "Coca-Cola Co Sustainability Reports (2006-2025)"
+[14]: https://www.bp.com/content/dam/bp/country-sites/nl-nl/netherlands/home/bp-nederland/bp-fleet/pdfs/bp-sustainability-report-2020.pdf?utm_source=chatgpt.com "g
+g
+i
+a
+i
+R
+i
+e
+y
+g
+re
+e
+for people and our planet"
+[15]: https://www.bp.com/content/dam/bp/business-sites/en/global/corporate/pdfs/sustainability/group-reports/bp-annual-report-on-the-voluntary-principles-on-security-and-human-rights-2021.pdf?utm_source=chatgpt.com "Annual report on the Voluntary"
+[16]: https://www.bp.com/content/dam/bp/business-sites/en/global/corporate/pdfs/sustainability/group-reports/bp-annual-report-on-the-voluntary-principles-on-security-and-human-rights-2022.pdf?utm_source=chatgpt.com "Annual report on the"
+[17]: https://www.bp.com/content/dam/bp/business-sites/en/global/corporate/pdfs/sustainability/group-reports/bp-sustainability-report-2024.pdf?utm_source=chatgpt.com "bp
+
+bp Sustainability Report 2024"
+[18]: https://www.responsibilityreports.com/HostedData/ResponsibilityReportArchive/b/LSE_BP_2022.pdf?utm_source=chatgpt.com "bp sustainability report 2022"
+[19]: https://www.sustainabilityreports.com/bp-plc?utm_source=chatgpt.com "BP PLC Sustainability Reports (1998-2025)"
+[20]: https://www.shell.com/sustainability/reporting-centre/reporting-centre-archive.html?utm_source=chatgpt.com "Reporting centre archive | Shell Global"
+[21]: https://www.shell.com/news-and-insights/annual-reports-and-publications/annual-reports-download-centre/_jcr_content/root/main/section/list_1340539940/list_item_copy_copy.multi.stream/1658493875148/78573b1122f9d09e5d16c2b5f0f30b1193f88c5d/shell-sustainability-report-2019.pdf?utm_source=chatgpt.com "SUSTAINABILITY REPORT 2019"
+[22]: https://reports.shell.com/sustainability-report/2023/_assets/downloads/shell-sustainability-report-2023.pdf?ftag=YHF4eb9d17&utm_source=chatgpt.com "Shell plc
+Sustainability  
+Report 2023
+\#PoweringPr"
+[23]: https://www.responsibilityreports.com/HostedData/ResponsibilityReportArchive/s/NYSE_SHEL_2022.pdf?utm_source=chatgpt.com "Shell plc
+Sustainability 
+Report 
+2022
+Responsible"
+[24]: https://www.sustainabilityreports.com/shell?utm_source=chatgpt.com "Shell PLC Sustainability Reports (1998-2025)"
+[25]: https://www.shell.com/news-and-insights/newsroom/news-and-media-releases/2024/shell-publishes-reports-on-sustainability-and-payments-to-governments.html?utm_source=chatgpt.com "Shell publishes reports on Sustainability and Payments to Governments | Shell Global"
+[26]: https://www.sustainabilityreports.com/services?utm_source=chatgpt.com "Data Services | SustainabilityReports.com"
+[27]: https://corporateregister.com/about/?utm_source=chatgpt.com "About Corporate Register - Corporate Register"
+[28]: https://corporateregister.com/cr-data-packages/?utm_source=chatgpt.com "CR Data Packages - Corporate Register"
