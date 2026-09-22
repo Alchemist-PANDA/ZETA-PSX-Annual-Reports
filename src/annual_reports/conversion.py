@@ -19,6 +19,24 @@ from .discovery import DiscoveryStore
 from .engine import (RateGate, Result, RunLock, SEC_REQUEST_INTERVAL_S,
                      StateStore, native_path, validate_and_store)
 
+CHROMIUM_RENDER_ARGS: list[str] = [
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-dev-shm-usage",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-breakpad",
+    "--disable-component-update",
+    "--disable-ipc-flooding-protection",
+    "--metrics-recording-only",
+    "--renderer-process-limit=16",
+    "--js-flags=--max-old-space-size=512",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class HtmlJob:
@@ -139,7 +157,7 @@ def ensure_conversion_table(connection: sqlite3.Connection) -> None:
 async def render_sec_html(
     state_path: Path, output_root: Path, cache_root: Path, user_agent: str,
     *, chrome_path: Path | None = None, limit: int | None = None,
-    network_workers: int = 8, render_workers: int = 4,
+    network_workers: int = 8, render_workers: int = 6,
     max_mib: int = 64,
 ) -> dict:
     if not user_agent or "@" not in user_agent:
@@ -186,13 +204,16 @@ async def render_sec_html(
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(
                         executable_path=str(chrome_path) if chrome_path else None,
-                        headless=True, args=["--no-sandbox"],
+                        headless=True, args=CHROMIUM_RENDER_ARGS,
                     )
                     context = await browser.new_context(java_script_enabled=False)
                     context.set_default_timeout(120_000)
 
                     async def block_network(route):
-                        await route.abort()
+                        if route.request.url.startswith("http://") or route.request.url.startswith("https://"):
+                            await route.abort()
+                        else:
+                            await route.continue_()
 
                     await context.route("**/*", block_network)
 
@@ -221,6 +242,7 @@ async def render_sec_html(
                     async def renderer() -> None:
                         nonlocal rendered
                         page = await context.new_page()
+                        docs_handled = 0
                         try:
                             while True:
                                 item = await render_queue.get()
@@ -229,7 +251,14 @@ async def render_sec_html(
                                     return
                                 job, cache_path, html = item
                                 try:
-                                    await page.set_content(html.decode("utf-8", errors="replace"), wait_until="domcontentloaded", timeout=30_000)
+                                    if docs_handled >= 4:
+                                        await page.close()
+                                        page = await context.new_page()
+                                        docs_handled = 0
+                                    if cache_path.is_file():
+                                        await page.goto(cache_path.resolve().as_uri(), wait_until="domcontentloaded", timeout=45_000)
+                                    else:
+                                        await page.set_content(html.decode("utf-8", errors="replace"), wait_until="domcontentloaded", timeout=45_000)
                                     pdf = await page.pdf(format="A4", print_background=True,
                                                          prefer_css_page_size=True)
                                     pages, digest = await asyncio.to_thread(validate_and_store, pdf, job.report, output_root)
@@ -244,12 +273,14 @@ async def render_sec_html(
                                     )
                                     ledger.connection.commit()
                                     rendered += 1
+                                    docs_handled += 1
                                 except Exception as exc:
                                     failed.append({"path": str(job.report.relative_path), "error": f"PDF render: {exc}"})
                                 finally:
                                     render_queue.task_done()
                         finally:
                             await page.close()
+
 
                     render_tasks = [asyncio.create_task(renderer()) for _ in range(render_workers)]
                     await asyncio.gather(*(network_worker() for _ in range(min(network_workers, queue.qsize()))))

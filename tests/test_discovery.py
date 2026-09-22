@@ -123,3 +123,44 @@ def test_fca_historic_map_resolves_only_needed_links(tmp_path: Path):
         assert tuple(row) == (new, "pdf", "DISCOVERED", 1)
     finally:
         store.close()
+
+
+def test_sec_ars_discovered_as_direct_pdf(tmp_path: Path):
+    archive = tmp_path / "submissions.zip"
+    filings = {
+        "form": ["ARS", "10-K"],
+        "reportDate": ["2024-12-31", "2024-12-31"],
+        "filingDate": ["2025-03-15", "2025-02-15"],
+        "accessionNumber": ["0000018230-25-000020", "0000018230-25-000010"],
+        "primaryDocument": ["glossy_ar.pdf", "10k_filing.htm"],
+    }
+    with zipfile.ZipFile(archive, "w") as stream:
+        stream.writestr("CIK0000018230.json", json.dumps({"filings": {
+            "recent": filings,
+            "files": [],
+        }}))
+    store = DiscoveryStore(tmp_path / "state.sqlite3")
+    try:
+        company = Company("USA", "Caterpillar Inc", "XNYS", "549300V6R0Z2O5N3W824",
+                          "US1491231015", "CAT", "18230")
+        store.add_universe([company], [2024])
+        result = discover_sec_bulk(store, archive)
+        assert result["candidate_filings"] == 2
+        
+        # Verify candidates table contains both the ARS PDF and the 10-K HTML
+        ars_cand = store.connection.execute(
+            "SELECT source_format, form_type, status, verified FROM candidates WHERE form_type='ARS'"
+        ).fetchone()
+        assert tuple(ars_cand) == ("pdf", "ARS", "DISCOVERED", 1)
+        
+        # Verify export_pdf_manifest selects the ARS PDF with report_type AR
+        manifest = tmp_path / "manifest.csv"
+        exported = export_pdf_manifest(store, manifest)
+        assert exported["pdf_rows"] == 1
+        report = load_manifest(manifest)[0]
+        assert report.fiscal_year == "FY2024"
+        assert report.report_type == "AR"
+        assert "glossy_ar.pdf" in report.pdf_url
+    finally:
+        store.close()
+

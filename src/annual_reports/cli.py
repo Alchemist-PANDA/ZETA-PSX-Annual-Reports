@@ -22,6 +22,7 @@ from .conversion import render_sec_html
 from .fca_conversion import render_fca_originals
 from .sustainability import import_metadata, ingest_zip
 from .annualreports import import_annualreports
+from .annualreports_site import discover as discover_annualreports_site
 from .engine import RunLock, Settings, StateStore, native_path, run, verify_store
 
 
@@ -54,6 +55,14 @@ def parser() -> argparse.ArgumentParser:
     ars_zip.add_argument("--index", type=Path, default=Path("annualreports-bulk-index.csv"))
     ars_zip.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
     ars_zip.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
+    ars_site = commands.add_parser("annualreports-discover", help="resolve AnnualReports.com company-page PDF links")
+    ars_site.add_argument("universe", type=Path)
+    ars_site.add_argument("--manifest", type=Path, default=Path("annualreports-direct.csv"))
+    ars_site.add_argument("--unresolved", type=Path, default=Path("annualreports-unresolved.csv"))
+    ars_site.add_argument("--cache", type=Path, default=Path("cache/annualreports/pages"))
+    ars_site.add_argument("--years", default="2017:2025")
+    ars_site.add_argument("--refresh", action="store_true")
+    ars_site.add_argument("--limit-companies", type=int)
     plan = commands.add_parser("plan", help="validate a CSV manifest and show its download plan")
     plan.add_argument("manifest", type=Path)
     plan.add_argument("--allow-http", action="store_true", help="local testing only")
@@ -85,6 +94,7 @@ def parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--workers", type=int, default=32)
     benchmark.add_argument("--per-host", type=int, default=2)
     benchmark.add_argument("--allow-http", action="store_true", help="local testing only")
+    benchmark.add_argument("--authorized-hosted", action="store_true")
     render = commands.add_parser("render-sec", help="download official SEC HTML and render local SOP PDFs")
     render.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
     render.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
@@ -112,6 +122,8 @@ def parser() -> argparse.ArgumentParser:
     download.add_argument("--attempts", type=int, default=2)
     download.add_argument("--allow-http", action="store_true", help="local testing only")
     download.add_argument("--replace", action="store_true", help="replace existing canonical files")
+    download.add_argument("--authorized-hosted", action="store_true",
+                          help="confirm your access permits automated AnnualReports.com PDF transfers")
     verify = commands.add_parser("verify", help="rehash and validate all recorded PDFs")
     verify.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
     verify.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
@@ -121,6 +133,14 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "annualreports-discover":
+            years = parse_years(args.years)
+            summary = asyncio.run(discover_annualreports_site(
+                args.universe, args.manifest, args.unresolved, args.cache,
+                years=(years[0], years[-1]), refresh=args.refresh,
+                limit_companies=args.limit_companies))
+            print(json.dumps(summary, indent=2))
+            return 1 if summary["source_blocked"] else 0
         if args.command == "annualreports-import":
             years = parse_years(args.years)
             print(json.dumps(import_annualreports(args.universe, args.metadata, args.direct,
@@ -190,7 +210,8 @@ def main(argv: list[str] | None = None) -> int:
             settings = Settings(args.output_root, args.state, workers=args.workers,
                                 per_host=args.per_host, allow_http=args.allow_http,
                                 sec_user_agent=os.getenv("SEC_USER_AGENT", ""),
-                                companies_house_key=os.getenv("COMPANIES_HOUSE_API_KEY", ""))
+                                companies_house_key=os.getenv("COMPANIES_HOUSE_API_KEY", ""),
+                                authorized_annualreports=args.authorized_hosted)
             with Live(table(), refresh_per_second=1) as live:
                 def progress(attempts: int, _total: int, downloaded: int, failed: int) -> None:
                     metrics.update(attempts=attempts, downloaded=downloaded, failed=failed)
@@ -312,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_mib=args.max_mib, attempts=args.attempts, allow_http=args.allow_http,
                 replace=args.replace, sec_user_agent=os.getenv("SEC_USER_AGENT", ""),
                 companies_house_key=os.getenv("COMPANIES_HOUSE_API_KEY", ""),
+                authorized_annualreports=args.authorized_hosted,
             )
             last_update = time.monotonic()
 

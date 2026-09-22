@@ -256,6 +256,7 @@ class Settings:
     replace: bool = False
     sec_user_agent: str = ""
     companies_house_key: str = ""
+    authorized_annualreports: bool = False
 
     def validate(self) -> None:
         if not 1 <= self.workers <= 128:
@@ -289,6 +290,8 @@ async def _fetch_one(
             if not _url(current_url, allow_http=settings.allow_http):
                 raise TransferError("unsafe redirect target", retryable=False)
             host = urlsplit(current_url).hostname or ""
+            if (host == "annualreports.com" or host.endswith(".annualreports.com")) and not settings.authorized_annualreports:
+                raise TransferError("AnnualReports.com hosted downloads require --authorized-hosted", retryable=False)
             host_semaphores.setdefault(host, asyncio.Semaphore(settings.per_host))
             async with host_semaphores[host]:
                 family = _rate_family(host)
@@ -368,6 +371,9 @@ async def run(
     if any(not report.verified for report in reports):
         raise ValueError("all report links must be verified=true before downloading")
     hosts = {urlsplit(report.pdf_url).hostname or "" for report in reports}
+    if (any(host == "annualreports.com" or host.endswith(".annualreports.com") for host in hosts)
+            and not settings.authorized_annualreports):
+        raise ValueError("AnnualReports.com hosted downloads require --authorized-hosted")
     if any(_rate_family(host) == "sec" for host in hosts) and not settings.sec_user_agent:
         raise ValueError("SEC_USER_AGENT must identify your organization and contact email")
     if any(_rate_family(host) == "companies_house" for host in hosts) and not settings.companies_house_key:

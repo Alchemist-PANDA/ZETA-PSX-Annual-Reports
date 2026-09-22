@@ -100,3 +100,36 @@ def test_fca_zip_rejects_path_traversal(tmp_path: Path):
     with zipfile.ZipFile(io.BytesIO(buffer.getvalue())) as archive:
         with pytest.raises(ValueError, match="unsafe path"):
             _safe_extract(archive, tmp_path)
+
+
+def test_render_sec_html_skips_when_ars_pdf_present(tmp_path: Path):
+    state_path = tmp_path / "state.sqlite3"
+    store = DiscoveryStore(state_path)
+    company = Company("USA", "Example Inc", "XNAS", "2138007ZFQYRUSLU3J98",
+                      "US0000000001", "EXM", "320193")
+    try:
+        store.add_universe([company], [2024])
+        # Add 10-K HTML candidate
+        store.upsert_candidate(
+            company_key=company.key, report_year=2024, source="SEC",
+            source_record_id="0000320193-25-000001",
+            source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000001/annual.htm",
+            source_format="html", form_type="10-K", filing_date="2025-01-01",
+            report_date="2024-12-31", status="DISCOVERED", verified=True,
+        )
+        # Add ARS PDF candidate for the same fiscal year
+        store.upsert_candidate(
+            company_key=company.key, report_year=2024, source="SEC",
+            source_record_id="0000320193-25-000002",
+            source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019325000002/glossy_ar.pdf",
+            source_format="pdf", form_type="ARS", filing_date="2025-02-01",
+            report_date="2024-12-31", status="DISCOVERED", verified=True,
+        )
+        store.commit()
+        from annual_reports.conversion import _jobs
+        jobs = _jobs(store, limit=None)
+        # Because an authentic PDF candidate exists, Chromium rendering jobs must be empty!
+        assert len(jobs) == 0
+    finally:
+        store.close()
+

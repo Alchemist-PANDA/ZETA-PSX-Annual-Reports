@@ -29,7 +29,7 @@ SEC_BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissi
 SEC_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 FCA_BASE = "https://data.fca.org.uk/"
 UNIVERSE_FIELDS = ("country", "company_name", "exchange", "lei", "isin", "ticker", "cik", "aliases")
-ANNUAL_FORMS = {"10-K", "20-F", "40-F"}
+ANNUAL_FORMS = {"10-K", "20-F", "40-F", "ARS"}
 YEAR_PATTERN = re.compile(r"(?<!\d)(20(?:1[7-9]|2[0-5]))(?!\d)")
 
 
@@ -323,6 +323,8 @@ def _ingest_sec_data(store: DiscoveryStore, company: Company, data: dict) -> int
         except ValueError:
             continue
         suffix = Path(primary).suffix.lower()
+        if form == "ARS" and suffix != ".pdf":
+            continue
         source_format = "pdf" if suffix == ".pdf" else "html" if suffix in {".htm", ".html", ".xhtml"} else "txt" if suffix == ".txt" else "unknown"
         is_amendment = form.endswith("/A")
         status = "AMENDMENT" if is_amendment else "DISCOVERED"
