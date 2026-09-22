@@ -4,7 +4,18 @@ For agent-run work, start with [AGENTS.md](AGENTS.md). It gives the exact workfl
 
 ## AnnualReports.com source option
 
-When the task explicitly requests AnnualReports.com, use `annualreports-import` with an authorized metadata export and, if available, a vendor-provided ZIP. This source is optional; the SEC/FCA paths remain available. The normalized metadata CSV columns are `country,isin,report_year,report_title,pdf_url,zip_member,source_page`. Match the supplied universe by exact country and ISIN. `pdf_url` is a direct HTTPS PDF URL; `zip_member` is the exact path inside an authorized ZIP. At least one is required. The importer writes an SOP-compliant direct manifest, a bulk ZIP index, and a review CSV before any transfer starts.
+When the task explicitly requests AnnualReports.com, `annualreports-discover` searches the site's company pages, verifies ticker and exchange against the supplied universe, and resolves the listed years and PDF links into one SOP-compliant manifest. It caches page HTML for seven days and writes missing or ambiguous company-years to `annualreports-unresolved.csv`. Discovery finishes before downloading starts. The existing concurrent engine then transfers PDFs, follows the site's recent-report redirects, validates page trees, hashes files, and writes atomic SOP names.
+
+```powershell
+ar-harvest annualreports-discover companies.csv --years 2017:2025
+ar-harvest plan annualreports-direct.csv
+ar-harvest run annualreports-direct.csv --authorized-hosted --workers 32 --per-host 2 --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+ar-harvest verify --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+```
+
+The `--authorized-hosted` flag explicitly enables automated AnnualReports.com PDF transfers when your access permits them. Start at two connections per host and tune with the accuracy-gated benchmark. Inspect `annualreports-unresolved.csv` and use SEC/FCA or official company archives for gaps. Discovery never guesses PDF URLs or downloads files while resolving company pages.
+
+For an authorized metadata export or vendor-provided ZIP, use `annualreports-import` and `annualreports-ingest-zip` instead. The normalized metadata CSV columns are `country,isin,report_year,report_title,pdf_url,zip_member,source_page`. Match the supplied universe by exact country and ISIN. `pdf_url` is a direct HTTPS PDF URL; `zip_member` is the exact path inside an authorized ZIP. At least one is required. The importer writes an SOP-compliant direct manifest, a bulk ZIP index, and a review CSV before transfer.
 
 ```powershell
 ar-harvest annualreports-import companies.csv annualreports-metadata.csv
@@ -12,7 +23,7 @@ ar-harvest annualreports-ingest-zip authorized-annualreports.zip --output-root "
 ar-harvest run annualreports-direct.csv --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
 ```
 
-AnnualReports.com [lists annual PDFs by company and year](https://www.annualreports.com/Company/microsoft-corporation), but no public bulk ZIP/API is documented on its [site information](https://www.annualreports.com/About). Its [robots.txt](https://www.annualreports.com/robots.txt) disallows automated HostedData PDF access. The importer therefore excludes AnnualReports.com hosted direct URLs unless `--authorized-hosted` is explicitly provided for an arrangement permitting automation. The repository does not crawl or bypass the site. A ZIP supplied through authorized access is ingested locally, with PDF validation, hashes, and SOP names. A hundred remote PDFs still require bytes to cross the network; no fixed seconds-per-hundred rate can be promised.
+AnnualReports.com [lists annual PDFs by company and year](https://www.annualreports.com/Company/microsoft-corporation), but no public bulk ZIP/API is documented on its [site information](https://www.annualreports.com/About). Its [robots.txt](https://www.annualreports.com/robots.txt) disallows automated HostedData PDF access. Use the hosted transfer flag only with access that permits automation. The implementation does not evade blocks or use proxies. A ZIP supplied through authorized access is ingested locally. Individual remote PDFs still require individual transfers; no fixed seconds-per-hundred rate can be promised.
 
 ## Sustainability pilot: first two companies
 
