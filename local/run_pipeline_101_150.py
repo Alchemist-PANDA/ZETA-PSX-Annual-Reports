@@ -11,10 +11,10 @@ from pathlib import Path
 import httpx
 import fitz
 
-from annual_reports.catalog import Report
+from annual_reports.catalog import Report, load_manifest
 from annual_reports.conversion import render_sec_html
-from annual_reports.discovery import Company, DiscoveryStore, _ingest_sec_data, parse_years
-from annual_reports.engine import RateGate, RunLock, StateStore, native_path, verify_store, SEC_REQUEST_INTERVAL_S
+from annual_reports.discovery import Company, DiscoveryStore, _ingest_sec_data, parse_years, export_pdf_manifest
+from annual_reports.engine import RateGate, RunLock, StateStore, Settings, native_path, verify_store, run as engine_run, SEC_REQUEST_INTERVAL_S
 
 OUTPUT_ROOT = Path("local").resolve()
 STATE_PATH = OUTPUT_ROOT / "harvest.sqlite3"
@@ -142,39 +142,74 @@ def main():
             comp_years = [str(m["year"]) for m in missing_slots if m["company"] == comp]
             print(f"  {comp:6s}: {cnt} missing ({', '.join(comp_years)})", flush=True)
 
-    # 4. Phase 2: High-Throughput Pre-Cache Network Ingestion
-    print("\n--- Phase 2: Bulk HTML Pre-Caching (Eliminating Render Starvation) ---", flush=True)
+    # 4. Phase 2: METHOD 1 (Direct Graphic PDF Passthrough - PRIMARY)
+    print("\n--- Phase 2: Method #1 (Direct Graphic PDF Passthrough - PRIMARY) ---", flush=True)
+    manifest_path = OUTPUT_ROOT / "pipeline_pdf_manifest.csv"
+    with RunLock(STATE_PATH):
+        store = DiscoveryStore(STATE_PATH)
+        try:
+            exported = export_pdf_manifest(store, manifest_path)
+            print(f"Discovered {exported['pdf_rows']} official graphic ARS PDF candidates for direct passthrough.", flush=True)
+        finally:
+            store.close()
+    
+    t_pdf0 = time.monotonic()
+    pdf_downloaded = 0
+    if exported["pdf_rows"] > 0:
+        pdf_reports = load_manifest(manifest_path)
+        pdf_settings = Settings(
+            output_root=OUTPUT_ROOT,
+            state_path=STATE_PATH,
+            workers=8,
+            per_host=4,
+            sec_user_agent=SEC_USER_AGENT,
+        )
+        pdf_summary = asyncio.run(engine_run(pdf_reports, pdf_settings))
+        pdf_downloaded = pdf_summary["downloaded"]
+        t_pdf = time.monotonic() - t_pdf0
+        print(f"Method #1 Execution Complete: Downloaded {pdf_downloaded} official graphic PDFs in {t_pdf:.2f}s ({pdf_summary['bytes']/(1024*1024):.2f} MB, {pdf_summary['pdfs_per_second']:.2f} docs/sec).", flush=True)
+    else:
+        print("No direct ARS PDFs discovered; falling back to Chromium HTML rendering for all slots.", flush=True)
+
+    # 5. Phase 3: METHOD 2 (Headless Chromium Layout & Rendering - AUTOMATIC FALLBACK)
+    print("\n--- Phase 3: Method #2 (Chromium Layout & Rendering - AUTOMATIC FALLBACK) ---", flush=True)
     t_net0 = time.monotonic()
-    gate = RateGate(SEC_REQUEST_INTERVAL_S)
     
-    html_jobs = [s for s in discovered_slots if s["format"] == "html"]
-    print(f"Pre-caching {len(html_jobs)} HTML filings to local SSD...", flush=True)
-    
-    cached_count = 0
-    downloaded_count = 0
-    with httpx.Client(timeout=45.0, headers={"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}) as client:
-        for idx, job in enumerate(html_jobs, 1):
-            cache_file = CACHE_ROOT / "sec" / "html" / f"{job['id']}.html"
-            if cache_file.is_file() and cache_file.stat().st_size >= 300:
-                cached_count += 1
-                continue
-            time.sleep(SEC_REQUEST_INTERVAL_S)
-            try:
-                r = client.get(job["url"])
-                if r.status_code == 200 and len(r.content) >= 300:
-                    cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    cache_file.write_bytes(r.content)
-                    downloaded_count += 1
-                    if downloaded_count % 10 == 0:
-                        print(f"  Downloaded {downloaded_count} new filings...", flush=True)
-            except Exception as e:
-                print(f"  Error downloading {job['company']} FY{job['year']}: {e}", flush=True)
+    # Query pending HTML jobs that do NOT have a direct PDF candidate
+    with RunLock(STATE_PATH):
+        store = DiscoveryStore(STATE_PATH)
+        try:
+            from annual_reports.conversion import _jobs
+            pending_html_jobs = _jobs(store, limit=None)
+            print(f"Pending HTML filings requiring Chromium layout: {len(pending_html_jobs)}", flush=True)
+        finally:
+            store.close()
 
-    t_net = time.monotonic() - t_net0
-    print(f"Pre-cache complete in {t_net:.2f}s (Already cached: {cached_count}, Downloaded: {downloaded_count}).", flush=True)
+    if pending_html_jobs:
+        print(f"Pre-caching {len(pending_html_jobs)} HTML filings to local SSD...", flush=True)
+        cached_count = 0
+        downloaded_count = 0
+        with httpx.Client(timeout=45.0, headers={"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}) as client:
+            for idx, job in enumerate(pending_html_jobs, 1):
+                cache_file = CACHE_ROOT / "sec" / "html" / f"{job.candidate_id}.html"
+                if cache_file.is_file() and cache_file.stat().st_size >= 300:
+                    cached_count += 1
+                    continue
+                time.sleep(SEC_REQUEST_INTERVAL_S)
+                try:
+                    r = client.get(job.report.pdf_url)
+                    if r.status_code == 200 and len(r.content) >= 300:
+                        cache_file.parent.mkdir(parents=True, exist_ok=True)
+                        cache_file.write_bytes(r.content)
+                        downloaded_count += 1
+                        if downloaded_count % 10 == 0:
+                            print(f"  Downloaded {downloaded_count} new filings...", flush=True)
+                except Exception as e:
+                    print(f"  Error downloading {job.report.ticker} {job.report.fiscal_year}: {e}", flush=True)
 
-    # 5. Phase 3: High-Throughput Chromium Rendering
-    print("\n--- Phase 3: High-Throughput Chromium Rendering (6 Workers, Engine Flags, file:// Goto, Tab Recycling) ---", flush=True)
+        t_net = time.monotonic() - t_net0
+        print(f"Pre-cache complete in {t_net:.2f}s (Already cached: {cached_count}, Downloaded: {downloaded_count}).", flush=True)
+
     t_render0 = time.monotonic()
     
     # We call render_sec_html with 6 workers (matching 6 physical cores)

@@ -14,9 +14,9 @@ import httpx
 
 import fitz
 
-from annual_reports.catalog import Report, FIELDS
+from annual_reports.catalog import Report, FIELDS, load_manifest
 from annual_reports.conversion import render_sec_html
-from annual_reports.discovery import Company, DiscoveryStore, _ingest_sec_data, parse_years
+from annual_reports.discovery import Company, DiscoveryStore, _ingest_sec_data, parse_years, export_pdf_manifest
 from annual_reports.engine import RateGate, RunLock, Settings, StateStore, native_path, run, verify_store, SEC_REQUEST_INTERVAL_S
 
 # 1. Output and State Setup
@@ -169,18 +169,42 @@ for batch_idx, batch_companies in enumerate(batches, start=1):
         finally:
             store.close()
             
-    # Render / Download reports
-    print(f"4. Rendering/Downloading reports for Batch {batch_idx}...")
-    batch_start_time = time.monotonic()
+    # Method 1 (PRIMARY): Direct Graphic PDF Passthrough
+    print(f"4a. Method #1 (Direct Graphic PDF Passthrough - PRIMARY) for Batch {batch_idx}...")
+    manifest_path = OUTPUT_ROOT / f"batch{batch_idx}_pdf_manifest.csv"
+    with RunLock(STATE_PATH):
+        store = DiscoveryStore(STATE_PATH)
+        try:
+            exported = export_pdf_manifest(store, manifest_path)
+            print(f"    Discovered {exported['pdf_rows']} official graphic ARS PDF candidates for direct download.")
+        finally:
+            store.close()
     
-    # Call render_sec_html
-    # We use 8 network workers and 6 Chromium render workers for optimal throughput
+    t_pdf0 = time.monotonic()
+    if exported["pdf_rows"] > 0:
+        pdf_reports = load_manifest(manifest_path)
+        pdf_settings = Settings(
+            output_root=OUTPUT_ROOT,
+            state_path=STATE_PATH,
+            workers=8,
+            per_host=4,
+            sec_user_agent=SEC_USER_AGENT,
+        )
+        pdf_summary = asyncio.run(run(pdf_reports, pdf_settings))
+        t_pdf = time.monotonic() - t_pdf0
+        print(f"    Method #1 Complete: Downloaded {pdf_summary['downloaded']} official graphic PDFs in {t_pdf:.2f}s ({pdf_summary['bytes']/(1024*1024):.2f} MB, {pdf_summary['pdfs_per_second']:.2f} docs/sec).")
+    else:
+        print("    No direct ARS PDFs discovered for this batch; proceeding to fallback.")
+
+    # Method 2 (FALLBACK): Headless Chromium Layout & Rendering
+    print(f"4b. Method #2 (Chromium Layout & Rendering - AUTOMATIC FALLBACK) for Batch {batch_idx}...")
+    batch_start_time = time.monotonic()
     render_summary = asyncio.run(render_sec_html(
         STATE_PATH, OUTPUT_ROOT, CACHE_ROOT, SEC_USER_AGENT,
         chrome_path=CHROME_PATH, network_workers=8, render_workers=6
     ))
     batch_elapsed = round(time.monotonic() - batch_start_time, 2)
-    print(f"   Render Complete: Rendered={render_summary['pdf_rendered']}, Skipped={render_summary['skipped']}, Failed={render_summary['failed']}, Elapsed={batch_elapsed}s ({render_summary['documents_per_second']} docs/sec)")
+    print(f"    Method #2 Complete: Rendered={render_summary['pdf_rendered']}, Skipped={render_summary['skipped']}, Failed={render_summary['failed']}, Elapsed={batch_elapsed}s ({render_summary['documents_per_second']} docs/sec)")
     
     # Verify local files
     print(f"5. Verifying PDF integrity, page counts, and SHA-256 for Batch {batch_idx}...")
