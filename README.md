@@ -1,8 +1,19 @@
-# US and UK annual report harvester
+# US and UK annual and sustainability report harvester
 
 ## Sustainability pilot: first two companies
 
-`examples/sustainability-first-two.csv` adds Microsoft and Coca-Cola official PDF candidates from the supplied sustainability research. Run `ar-harvest plan examples/sustainability-first-two.csv`, then `ar-harvest run examples/sustainability-first-two.csv --output-root <local-SSD-folder> --state harvest.sqlite3`. Coca-Cola's business/sustainability reports use `IR`; its environmental updates use `CLIMATE`, so they are not mislabeled as standalone sustainability reports. The file includes only source URLs provided in the research; missing company-years remain unresolved. The full 2017–2025 US/UK pipeline specification is in `docs/sustainability-pipeline.md`. Its authorized bulk-portal route requires a portal export and is not yet implemented.
+`examples/sustainability-first-two.csv` contains Microsoft and Coca-Cola official PDF examples. They illustrate report-family changes; they are not the company limit. The general workflow below accepts any supplied US/UK universe and 2017–2025 metadata export. The full source strategy is in `docs/sustainability-pipeline.md`.
+
+Create a company identity CSV using `examples/universe.csv`. Obtain an **authorized** bulk portal export, or create the same metadata format from official company archive links. Required columns are `company_name,ticker,isin,country,report_year,report_title,report_type,language,source_url,filename,page_count`. `source_url` is an HTTPS direct PDF URL when available; `filename` is an exact member path in a supplied bulk ZIP. Rows may have either or both. Country uses `USA` or `GBR`, and `report_year` uses `2017` through `2025`.
+
+```powershell
+ar-harvest sr-import companies.csv authorized-metadata.csv --years 2017:2025
+ar-harvest plan sr-direct.csv
+ar-harvest run sr-direct.csv --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+ar-harvest sr-ingest-zip authorized-bulk.zip --index sr-bulk-index.csv --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+```
+
+`sr-import` joins by exact country and ISIN, classifies standalone sustainability/ESG/CSR, integrated reports, and topic updates, and writes ambiguous or unmatched rows to `sr-review.csv`. Conflicting reports for the same SOP path go to review. It creates the full URL manifest before `run` starts. `sr-ingest-zip` reads only listed members, caps member size, verifies PDF structure, hashes the bytes, writes atomically to the SOP path, and records results in SQLite. The portal itself does not expose an authorized automation API in this repository; obtain its metadata and ZIP through your licensed workflow. Official archive URLs can use the same metadata import format. Report availability and access depend on the supplied universe and source exports.
 
 A local, resumable discovery and PDF ingestion system for US and UK annual reports, fiscal years 2017–2025. It follows the supplied **Phase-1 SOP: Folder & PDF File Naming Standard** and uses the two authoritative sources specified in `AR sources.txt`: SEC EDGAR and FCA NSM.
 

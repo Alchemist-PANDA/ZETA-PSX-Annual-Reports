@@ -15,3 +15,6 @@ resolved-reports.csv
 benchmark.csv
 cache/
 ~$*.xlsx
+sr-direct.csv
+sr-bulk-index.csv
+sr-review.csv
