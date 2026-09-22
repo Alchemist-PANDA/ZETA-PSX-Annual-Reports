@@ -21,6 +21,7 @@ from .discovery import (DiscoveryStore, discover_sec_bulk, discover_sec_history,
 from .conversion import render_sec_html
 from .fca_conversion import render_fca_originals
 from .sustainability import import_metadata, ingest_zip
+from .annualreports import import_annualreports
 from .engine import RunLock, Settings, StateStore, native_path, run, verify_store
 
 
@@ -39,6 +40,20 @@ def parser() -> argparse.ArgumentParser:
     sr_zip.add_argument("--index", type=Path, default=Path("sr-bulk-index.csv"))
     sr_zip.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
     sr_zip.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
+    ars = commands.add_parser("annualreports-import", help="import authorized AnnualReports.com annual-report metadata")
+    ars.add_argument("universe", type=Path)
+    ars.add_argument("metadata", type=Path)
+    ars.add_argument("--direct", type=Path, default=Path("annualreports-direct.csv"))
+    ars.add_argument("--bulk-index", type=Path, default=Path("annualreports-bulk-index.csv"))
+    ars.add_argument("--review", type=Path, default=Path("annualreports-review.csv"))
+    ars.add_argument("--years", default="2017:2025")
+    ars.add_argument("--authorized-hosted", action="store_true",
+                     help="explicitly enable HostedData/Click direct URLs when your access permits automation")
+    ars_zip = commands.add_parser("annualreports-ingest-zip", help="ingest an authorized AnnualReports.com bulk ZIP")
+    ars_zip.add_argument("archive", type=Path)
+    ars_zip.add_argument("--index", type=Path, default=Path("annualreports-bulk-index.csv"))
+    ars_zip.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
+    ars_zip.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
     plan = commands.add_parser("plan", help="validate a CSV manifest and show its download plan")
     plan.add_argument("manifest", type=Path)
     plan.add_argument("--allow-http", action="store_true", help="local testing only")
@@ -106,6 +121,17 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "annualreports-import":
+            years = parse_years(args.years)
+            print(json.dumps(import_annualreports(args.universe, args.metadata, args.direct,
+                                                  args.bulk_index, args.review,
+                                                  authorized_hosted=args.authorized_hosted,
+                                                  years=(years[0], years[-1])), indent=2))
+            return 0
+        if args.command == "annualreports-ingest-zip":
+            summary = ingest_zip(args.archive, args.index, args.output_root, args.state)
+            print(json.dumps(summary, indent=2))
+            return 0 if not summary.get("failed") else 1
         if args.command == "sr-import":
             years = parse_years(args.years)
             print(json.dumps(import_metadata(args.universe, args.metadata, args.direct,

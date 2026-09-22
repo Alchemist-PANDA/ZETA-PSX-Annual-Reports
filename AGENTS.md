@@ -10,6 +10,7 @@ Correct report identity and complete, readable English PDFs are required. Optimi
 
 1. Identify company by country, LEI, ISIN, ticker, MIC, and US CIK where applicable. Use `examples/universe.csv`; do not guess identifiers. Record fiscal year separately from publication year.
 2. For annual reports, use SEC bulk submissions for US (`load-universe`, then `discover-us`) and FCA NSM CSV exports for UK (`import-fca-csv`). Use `render-sec` and `render-fca` for original filings that are HTML/XHTML/ZIP. Follow the README commands.
+   If the user explicitly chooses AnnualReports.com, use the `annualreports-import` adapter for authorized metadata and `annualreports-ingest-zip` for an authorized bulk package. Do not assume a public bulk API exists. Hosted direct URLs require `--authorized-hosted` and an arrangement permitting automation; do not crawl or bypass the site's restrictions.
 3. For sustainability/ESG/CSR, obtain authorized SustainabilityReports bulk metadata and ZIP when available. Never scrape its normal site for bulk files. For missing records, use official company reporting archives and direct PDF links. Convert either source to the `sr-import` metadata CSV described in README. The first-two-company CSV is an example, not the universe.
 4. Classify standalone sustainability/ESG/CSR as `SR`; integrated business/annual reporting as `IR`; topic updates as `CLIMATE` or `OTHER`. A topic update is not a standalone SR. Multiple candidate files for the same company, fiscal year, and SOP type require review.
 5. Resolve all URLs and ZIP member paths before downloading. Import metadata, inspect `sr-review.csv`, and finish a manifest before starting the transfer queue.
@@ -19,7 +20,7 @@ Correct report identity and complete, readable English PDFs are required. Optimi
 1. Run `py -m pytest -q` before a substantial code change and after it.
 2. Build/verify the company universe and metadata for the requested set. Use `ar-harvest plan` on a direct manifest. Resolve conflicts and invalid identities before transferring files.
 3. Use `ar-harvest run` for direct PDFs and `ar-harvest sr-ingest-zip` for authorized bulk ZIPs. Use a local SSD output directory. The engine already handles host interleaving, SEC rate limits, bounded retries, PDF validation, SHA-256, atomic writes, and SQLite state. Do not launch one browser per report or perform search while download workers are occupied.
-4. Run `ar-harvest verify` for direct downloads. Check the ZIP ingestion summary and `sustainability_bulk` SQLite table for bulk files. Audit all exceptions and spot-check report title, issuer, fiscal year, language, and completeness. Check for orphaned `.part` files.
+4. Run `ar-harvest verify` for direct downloads. Check the ZIP ingestion summary and `bulk_reports` SQLite table for bulk files. Audit all exceptions and spot-check report title, issuer, fiscal year, language, and completeness. Check for orphaned `.part` files.
 5. Report requested, resolved, verified, failed, and unresolved company-years separately. Give actual elapsed time and throughput, plus the source and output directory. Do not equate local synthetic speed with internet throughput.
 
 ## Continuous speed experiments

@@ -152,7 +152,7 @@ def ingest_zip(archive: Path, index: Path, output_root: Path, state_path: Path) 
         state_path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(state_path)
         try:
-            db.execute("""CREATE TABLE IF NOT EXISTS sustainability_bulk (
+            db.execute("""CREATE TABLE IF NOT EXISTS bulk_reports (
                 relative_path TEXT PRIMARY KEY, archive TEXT NOT NULL,
                 zip_member TEXT NOT NULL, bytes INTEGER NOT NULL,
                 pages INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -192,13 +192,13 @@ def ingest_zip(archive: Path, index: Path, output_root: Path, state_path: Path) 
                         if check.read(5) != b"%PDF-":
                             raise ValueError("missing PDF signature")
                     os.replace(native_path(staged), native_path(target))
-                    db.execute("INSERT OR REPLACE INTO sustainability_bulk VALUES (?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT OR REPLACE INTO bulk_reports VALUES (?,?,?,?,?,?,?,?)",
                                (str(report.relative_path), str(archive), member, size, pages,
                                 digest.hexdigest(), "VERIFIED", ""))
                     results["verified"] += 1
                     results["bytes"] += size
                 except (KeyError, ValueError, OSError, zipfile.BadZipFile, fitz.FileDataError) as exc:
-                    db.execute("INSERT OR REPLACE INTO sustainability_bulk VALUES (?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT OR REPLACE INTO bulk_reports VALUES (?,?,?,?,?,?,?,?)",
                                (str(report.relative_path), str(archive), member, 0, 0, "", "FAILED", str(exc)))
                     results["failed"] += 1
                 finally:

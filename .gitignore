@@ -20,3 +20,6 @@ sr-bulk-index.csv
 sr-review.csv
 benchmarks/results.jsonl
 benchmarks/champions.json
+annualreports-direct.csv
+annualreports-bulk-index.csv
+annualreports-review.csv

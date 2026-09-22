@@ -2,6 +2,18 @@
 
 For agent-run work, start with [AGENTS.md](AGENTS.md). It gives the exact workflow for English-language requests and the accuracy-gated speed experiment. A local benchmark can be started with `py benchmarks/optimize.py fixture`; real-source experiments require a reviewed `golden.csv` with `relative_path,sha256,pages` and `py benchmarks/optimize.py real --manifest sample.csv --golden golden.csv --repeats 2`. The script logs trials and promotes a faster setting only after all checks pass.
 
+## AnnualReports.com source option
+
+When the task explicitly requests AnnualReports.com, use `annualreports-import` with an authorized metadata export and, if available, a vendor-provided ZIP. This source is optional; the SEC/FCA paths remain available. The normalized metadata CSV columns are `country,isin,report_year,report_title,pdf_url,zip_member,source_page`. Match the supplied universe by exact country and ISIN. `pdf_url` is a direct HTTPS PDF URL; `zip_member` is the exact path inside an authorized ZIP. At least one is required. The importer writes an SOP-compliant direct manifest, a bulk ZIP index, and a review CSV before any transfer starts.
+
+```powershell
+ar-harvest annualreports-import companies.csv annualreports-metadata.csv
+ar-harvest annualreports-ingest-zip authorized-annualreports.zip --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+ar-harvest run annualreports-direct.csv --output-root "D:\GLOBAL_SUSTAINABILITY_DATABASE"
+```
+
+AnnualReports.com [lists annual PDFs by company and year](https://www.annualreports.com/Company/microsoft-corporation), but no public bulk ZIP/API is documented on its [site information](https://www.annualreports.com/About). Its [robots.txt](https://www.annualreports.com/robots.txt) disallows automated HostedData PDF access. The importer therefore excludes AnnualReports.com hosted direct URLs unless `--authorized-hosted` is explicitly provided for an arrangement permitting automation. The repository does not crawl or bypass the site. A ZIP supplied through authorized access is ingested locally, with PDF validation, hashes, and SOP names. A hundred remote PDFs still require bytes to cross the network; no fixed seconds-per-hundred rate can be promised.
+
 ## Sustainability pilot: first two companies
 
 `examples/sustainability-first-two.csv` contains Microsoft and Coca-Cola official PDF examples. They illustrate report-family changes; they are not the company limit. The general workflow below accepts any supplied US/UK universe and 2017–2025 metadata export. The full source strategy is in `docs/sustainability-pipeline.md`.
