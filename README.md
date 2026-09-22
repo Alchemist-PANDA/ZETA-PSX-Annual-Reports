@@ -1,5 +1,7 @@
 # US and UK annual and sustainability report harvester
 
+For agent-run work, start with [AGENTS.md](AGENTS.md). It gives the exact workflow for English-language requests and the accuracy-gated speed experiment. A local benchmark can be started with `py benchmarks/optimize.py fixture`; real-source experiments require a reviewed `golden.csv` with `relative_path,sha256,pages` and `py benchmarks/optimize.py real --manifest sample.csv --golden golden.csv --repeats 2`. The script logs trials and promotes a faster setting only after all checks pass.
+
 ## Sustainability pilot: first two companies
 
 `examples/sustainability-first-two.csv` contains Microsoft and Coca-Cola official PDF examples. They illustrate report-family changes; they are not the company limit. The general workflow below accepts any supplied US/UK universe and 2017–2025 metadata export. The full source strategy is in `docs/sustainability-pipeline.md`.

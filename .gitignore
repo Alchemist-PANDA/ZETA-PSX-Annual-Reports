@@ -18,3 +18,5 @@ cache/
 sr-direct.csv
 sr-bulk-index.csv
 sr-review.csv
+benchmarks/results.jsonl
+benchmarks/champions.json
