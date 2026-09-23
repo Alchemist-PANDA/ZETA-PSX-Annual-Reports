@@ -23,7 +23,8 @@ def _chrome() -> Path | None:
     return Path(binary) if binary else None
 
 
-def test_cached_sec_html_renders_to_sop_pdf(tmp_path: Path):
+@pytest.mark.parametrize("browser_processes", [1, 2])
+def test_cached_sec_html_renders_to_sop_pdf(tmp_path: Path, browser_processes: int, monkeypatch):
     pytest.importorskip("playwright")
     chrome = _chrome()
     if chrome is None:
@@ -50,11 +51,55 @@ def test_cached_sec_html_renders_to_sop_pdf(tmp_path: Path):
     html = "<html><body><h1>Example Inc Annual Report 2024</h1>" + "<p>Financial statements and auditor report.</p>" * 20 + "</body></html>"
     (cache / f"{candidate_id}.html").write_text(html, encoding="utf-8")
     coroutine = render_sec_html(state_path, tmp_path / "data", tmp_path / "cache",
-                                "Example Research contact@example.org", chrome_path=chrome)
+                                "Example Research contact@example.org", chrome_path=chrome,
+                                render_workers=2, browser_processes=browser_processes)
     summary = asyncio.run(coroutine)
     assert summary["pdf_rendered"] == 1, summary
     assert summary["html_downloaded"] == 0
+    assert summary["browser_processes"] == browser_processes
+    assert summary["stage_worker_seconds"]["print_pdf"] > 0
     assert verify_store(tmp_path / "data", state_path)["ok"]
+    if browser_processes == 2:
+        from playwright.async_api import BrowserContext
+
+        async def broken_page(self):
+            raise RuntimeError("simulated browser worker startup failure")
+
+        monkeypatch.setattr(BrowserContext, "new_page", broken_page)
+
+        async def failing_run():
+            return await asyncio.wait_for(render_sec_html(
+                state_path, tmp_path / "new-output", tmp_path / "cache",
+                "Example Research contact@example.org", chrome_path=chrome,
+                render_workers=1), timeout=15)
+
+        with pytest.raises(ExceptionGroup) as caught:
+            asyncio.run(failing_run())
+        assert any("simulated browser" in str(exc) for exc in caught.value.exceptions)
+
+
+def test_render_rejects_invalid_browser_pool(tmp_path: Path):
+    with pytest.raises(ValueError, match="browser_processes"):
+        asyncio.run(render_sec_html(tmp_path / "state.sqlite3", tmp_path, tmp_path,
+                                   "Test contact@example.org", render_workers=2, browser_processes=3))
+
+
+def test_job_selection_restricts_company_before_limit(tmp_path: Path):
+    from annual_reports.conversion import _jobs
+    store = DiscoveryStore(tmp_path / "state.sqlite3")
+    try:
+        companies = [Company("USA", ticker, "XNAS", "2138007ZFQYRUSLU3J98",
+                             "US0000000001", ticker, "320193") for ticker in ("AAA", "BBB")]
+        store.add_universe(companies, [2024])
+        for company in companies:
+            store.upsert_candidate(company_key=company.key, report_year=2024, source="SEC",
+                                   source_record_id=company.ticker, source_format="html", form_type="10-K",
+                                   source_url="https://www.sec.gov/annual.htm", status="DISCOVERED", verified=True)
+        store.commit()
+        assert _jobs(store, 1, {companies[1].key})[0].report.ticker == "BBB"
+        assert _jobs(store, 1, set()) == []
+    finally:
+        store.close()
 
 
 def test_cached_fca_zip_renders_to_sop_pdf(tmp_path: Path):
@@ -132,4 +177,3 @@ def test_render_sec_html_skips_when_ars_pdf_present(tmp_path: Path):
         assert len(jobs) == 0
     finally:
         store.close()
-

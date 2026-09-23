@@ -184,12 +184,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--golden", type=Path, help="independently verified CSV, required in real mode")
     parser.add_argument("--configs", help="comma-separated workers:per-host candidates")
     parser.add_argument("--repeats", type=int, help="fixture default 2; real default 1")
+    parser.add_argument("--target-rate", type=float, help="required PDFs/second; exit 2 if valid runs miss it")
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--image-side", type=int, default=256)
     parser.add_argument("--delay-ms", type=float, default=10)
     parser.add_argument("--history", type=Path, default=Path("benchmarks/results.jsonl"))
     parser.add_argument("--champion", type=Path, default=Path("benchmarks/champions.json"))
     args = parser.parse_args(argv)
+    if args.target_rate is not None and args.target_rate <= 0:
+        parser.error("target-rate must be positive")
     if args.repeats is not None and not 1 <= args.repeats <= 5:
         parser.error("repeats must be 1-5")
     server = thread = None
@@ -251,8 +254,13 @@ def main(argv: list[str] | None = None) -> int:
                       "previous_champion": previous, "promoted": promoted,
                       "next_candidates": nearby_configs(champions.get(fingerprint), args.mode),
                       "note": "Real-source results depend on server and network conditions; repeat before changing defaults."}
+    recommendation["target_rate"] = args.target_rate
+    recommendation["target_met"] = (None if args.target_rate is None else
+                                    bool(winner and len(reports) / winner[0] >= args.target_rate))
     print(json.dumps(recommendation, indent=2))
-    return 0 if winner else 1
+    if not winner:
+        return 1
+    return 2 if recommendation["target_met"] is False else 0
 
 
 if __name__ == "__main__":

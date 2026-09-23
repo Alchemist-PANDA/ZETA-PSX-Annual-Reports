@@ -109,6 +109,9 @@ def parser() -> argparse.ArgumentParser:
     render.add_argument("--limit", type=int)
     render.add_argument("--network-workers", type=int, default=8)
     render.add_argument("--render-workers", type=int, default=4)
+    render.add_argument("--browser-processes", type=int, default=1,
+                        help="independent Chromium instances; total pages remain --render-workers")
+    render.add_argument("--universe", type=Path, help="restrict rendering to companies in this universe CSV")
     fca_render = commands.add_parser("render-fca", help="preserve FCA originals and render XHTML/ZIP reports to SOP PDFs")
     fca_render.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
     fca_render.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
@@ -133,6 +136,17 @@ def parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify", help="rehash and validate all recorded PDFs")
     verify.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
     verify.add_argument("--state", type=Path, default=Path("harvest.sqlite3"))
+    batch = commands.add_parser("harvest-batch", help="run the full Two-Tier SEC EDGAR pipeline (discover, direct ARS PDFs, self-healing Chromium render, and verify)")
+    batch.add_argument("universe", type=Path)
+    batch.add_argument("--years", default="2017:2025")
+    batch.add_argument("--state", type=Path, default=Path("local/harvest.sqlite3"))
+    batch.add_argument("--output-root", type=Path, default=Path("GLOBAL_SUSTAINABILITY_DATABASE"))
+    batch.add_argument("--cache", type=Path, default=Path("cache"))
+    batch.add_argument("--workers", type=int, default=16)
+    batch.add_argument("--per-host", type=int, default=8)
+    batch.add_argument("--network-workers", type=int, default=8)
+    batch.add_argument("--render-workers", type=int, default=6)
+    batch.add_argument("--browser-processes", type=int, default=3)
     return cli
 
 
@@ -272,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
                     os.getenv("SEC_USER_AGENT", ""), chrome_path=chrome,
                     limit=args.limit, network_workers=args.network_workers,
                     render_workers=args.render_workers,
+                    browser_processes=args.browser_processes,
+                    company_keys={c.key for c in read_universe(args.universe)} if args.universe else None,
                 )
             else:
                 coroutine = render_fca_originals(
@@ -367,6 +383,60 @@ def main(argv: list[str] | None = None) -> int:
                 writer.writerows(summary["failures"])
             print(json.dumps(summary, indent=2))
             return 0 if summary["failed"] == 0 else 1
+        if args.command == "harvest-batch":
+            args.state.parent.mkdir(parents=True, exist_ok=True)
+            args.output_root.mkdir(parents=True, exist_ok=True)
+            companies = read_universe(args.universe)
+            company_keys = {c.key for c in companies}
+            years = parse_years(args.years)
+            sec_agent = os.getenv("SEC_USER_AGENT", "blackswan capital khanholdings127@gmail.com")
+            manifest_path = args.state.parent / f"{args.universe.stem}_pdf_manifest.csv"
+            with RunLock(args.state):
+                store = DiscoveryStore(args.state)
+                try:
+                    store.add_universe(companies, years)
+                    archive = download_sec_bulk(args.cache / "sec" / "submissions.zip", sec_agent)
+                    discover_sec_bulk(store, archive)
+                    asyncio.run(discover_sec_history(store, archive, args.cache / "sec" / "history", sec_agent))
+                    export_pdf_manifest(store, manifest_path)
+                finally:
+                    store.close()
+            all_pdfs = load_manifest(manifest_path) if manifest_path.is_file() else []
+            cohort_pdfs = [r for r in all_pdfs if (r.country, r.lei, r.isin, r.ticker) in company_keys]
+            pdf_summary = {"downloaded": 0, "skipped": 0, "failed": 0}
+            if cohort_pdfs:
+                settings = Settings(
+                    output_root=args.output_root, state_path=args.state,
+                    workers=args.workers, per_host=args.per_host,
+                    sec_user_agent=sec_agent,
+                )
+                if os.name == "nt":
+                    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                        pdf_summary = runner.run(run(cohort_pdfs, settings))
+                else:
+                    pdf_summary = asyncio.run(run(cohort_pdfs, settings))
+            chrome = None
+            if os.name == "nt":
+                for candidate in (Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+                                  Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")):
+                    if candidate.is_file():
+                        chrome = candidate
+                        break
+            render_summary = asyncio.run(render_sec_html(
+                args.state, args.output_root, args.cache, sec_agent,
+                chrome_path=chrome, network_workers=args.network_workers,
+                render_workers=args.render_workers, browser_processes=args.browser_processes,
+                company_keys=company_keys,
+            ))
+            verify_summary = verify_store(args.output_root, args.state)
+            result = {
+                "companies": len(companies),
+                "direct_pdf": pdf_summary,
+                "chromium_render": render_summary,
+                "verify": verify_summary,
+            }
+            print(json.dumps(result, indent=2))
+            return 0 if verify_summary.get("ok") else 1
         if not args.state.is_file():
             raise ValueError(f"state database not found: {args.state}")
         summary = verify_store(args.output_root, args.state)

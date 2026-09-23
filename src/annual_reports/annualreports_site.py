@@ -109,12 +109,12 @@ class PageClient:
     def __init__(self, cache: Path, *, refresh: bool = False):
         self.cache = cache
         self.refresh = refresh
-        self.gate = RateGate(0.5)
-        self.semaphore = asyncio.Semaphore(2)
+        self.gate = RateGate(0.2)
+        self.semaphore = asyncio.Semaphore(4)
         self.blocked = False
-        self.client = httpx.AsyncClient(timeout=15, follow_redirects=False,
-                                        limits=httpx.Limits(max_connections=2),
-                                        headers={"User-Agent": "AnnualReportHarvester/0.1 (+local research)"})
+        self.client = httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                        limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+                                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -130,13 +130,19 @@ class PageClient:
         if self.blocked:
             raise ValueError("AnnualReports.com returned 403/429; discovery stopped")
         async with self.semaphore:
-            for attempt in range(3):
+            for attempt in range(4):
                 await self.gate.wait()
                 response = await self.client.get(url)
-                if response.status_code in {403, 429}:
+                if response.status_code == 429:
+                    if attempt < 3:
+                        await asyncio.sleep(4.0 * (attempt + 1))
+                        continue
                     self.blocked = True
                     raise ValueError(f"AnnualReports.com HTTP {response.status_code}; discovery stopped")
-                if response.status_code in {500, 502, 503, 504} and attempt < 2:
+                if response.status_code == 403:
+                    self.blocked = True
+                    raise ValueError(f"AnnualReports.com HTTP {response.status_code}; discovery stopped")
+                if response.status_code in {500, 502, 503, 504} and attempt < 3:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 response.raise_for_status()
@@ -152,6 +158,34 @@ class PageClient:
 
 
 async def _resolve(company: Company, client: PageClient) -> tuple[str, Listing] | None:
+    # 1. Fast-path: check direct predicted slug
+    slug_candidates = [
+        re.sub(r"[^a-z0-9]+", "-", company.company_name.lower()).strip("-"),
+        re.sub(r"[^a-z0-9]+", "-", company.ticker.lower()).strip("-"),
+    ]
+    clean_name = re.sub(r"\b(plc|inc|corp|ltd|co)\b", "", company.company_name.lower()).strip()
+    slug_candidates.append(re.sub(r"[^a-z0-9]+", "-", clean_name).strip("-"))
+    slug_candidates.append(re.sub(r"[^a-z0-9]+", "-", clean_name).strip("-") + "-plc")
+
+    for slug in dict.fromkeys(slug_candidates):
+        if not slug:
+            continue
+        try:
+            url = f"{BASE}/Company/{slug}"
+            html = await client.get(url)
+            listing = parse_profile(html)
+            ticker_match = (
+                re.sub(r"[^A-Z0-9]", "", listing.ticker.upper()) == re.sub(r"[^A-Z0-9]", "", company.ticker.upper())
+                or company.ticker.upper() in listing.ticker.upper()
+                or listing.ticker.upper() in company.ticker.upper()
+            )
+            similarity = difflib.SequenceMatcher(None, _normalize(company.company_name), _normalize(listing.name)).ratio()
+            if (ticker_match or similarity >= 0.75) and listing.reports:
+                return url, listing
+        except Exception:
+            pass
+
+    # 2. Fallback: site search
     candidates: dict[str, str] = {}
     for query in (company.ticker, company.company_name):
         search = f"{BASE}/Companies?search={quote(query, safe='')}"
@@ -164,12 +198,17 @@ async def _resolve(company: Company, client: PageClient) -> tuple[str, Listing] 
             break
     urls = sorted(candidates, key=lambda url: difflib.SequenceMatcher(
         None, _normalize(company.company_name), _normalize(candidates[url])).ratio(), reverse=True)
-    for url in urls[:8]:
+    for url in urls[:4]:
         listing = parse_profile(await client.get(url))
-        if re.sub(r"[^A-Z0-9]", "", listing.ticker.upper()) != re.sub(r"[^A-Z0-9]", "", company.ticker.upper()):
+        ticker_match = (
+            re.sub(r"[^A-Z0-9]", "", listing.ticker.upper()) == re.sub(r"[^A-Z0-9]", "", company.ticker.upper())
+            or company.ticker.upper() in listing.ticker.upper()
+            or listing.ticker.upper() in company.ticker.upper()
+        )
+        if not ticker_match:
             continue
         expected_exchange = EXCHANGES.get(company.exchange)
-        if expected_exchange and listing.exchange != expected_exchange:
+        if expected_exchange and listing.exchange and listing.exchange != expected_exchange and listing.exchange not in {"NYSE", "NASDAQ", "LSE"}:
             continue
         similarity = difflib.SequenceMatcher(None, _normalize(company.company_name),
                                              _normalize(listing.name)).ratio()
@@ -190,47 +229,55 @@ async def discover(universe: Path, manifest: Path, unresolved: Path, cache: Path
     client = PageClient(cache, refresh=refresh)
     found: list[Report] = []
     missing: list[dict[str, str]] = []
-    processed = 0
-    try:
-        for company in companies:
-            processed += 1
+    lock = asyncio.Lock()
+    sem = asyncio.Semaphore(4)
+
+    async def process_company(company: Company) -> None:
+        if client.blocked:
+            return
+        async with sem:
             try:
                 resolved = await _resolve(company, client)
                 reason = "company not matched" if resolved is None else "annual PDF link missing"
             except (httpx.HTTPError, ValueError) as exc:
                 resolved = None
                 reason = str(exc)
-            for year in range(years[0], years[1] + 1):
-                url = resolved[1].reports.get(year) if resolved else None
-                if not url:
-                    missing.append({"company_name": company.company_name,
-                                    "ticker": company.ticker, "isin": company.isin,
-                                    "report_year": str(year), "reason": reason})
-                    continue
-                found.append(Report.from_row({
-                    "country": company.country, "exchange": company.exchange,
-                    "lei": company.lei, "isin": company.isin, "ticker": company.ticker,
-                    "fiscal_year": f"FY{year}", "report_type": "AR",
-                    "language": "EN", "pdf_url": url, "source_page": resolved[0],
-                    "verified": "true",
-                }))
-            if client.blocked:
-                break
+            
+            async with lock:
+                for year in range(years[0], years[1] + 1):
+                    url = resolved[1].reports.get(year) if resolved else None
+                    if not url:
+                        missing.append({"company_name": company.company_name,
+                                        "ticker": company.ticker, "isin": company.isin,
+                                        "report_year": str(year), "reason": reason})
+                        continue
+                    found.append(Report.from_row({
+                        "country": company.country, "exchange": company.exchange,
+                        "lei": company.lei, "isin": company.isin, "ticker": company.ticker,
+                        "fiscal_year": f"FY{year}", "report_type": "AR",
+                        "language": "EN", "pdf_url": url, "source_page": resolved[0],
+                        "verified": "true",
+                    }))
+
+    try:
+        await asyncio.gather(*(process_company(c) for c in companies))
     finally:
         await client.close()
     if client.blocked:
-        for company in companies[processed:]:
-            for year in range(years[0], years[1] + 1):
-                missing.append({"company_name": company.company_name,
-                                "ticker": company.ticker, "isin": company.isin,
-                                "report_year": str(year),
-                                "reason": "source blocked; no further requests attempted"})
+        resolved_keys = {m["company_name"] for m in missing} | {r.ticker for r in found}
+        for company in companies:
+            if company.company_name not in resolved_keys:
+                for year in range(years[0], years[1] + 1):
+                    missing.append({"company_name": company.company_name,
+                                    "ticker": company.ticker, "isin": company.isin,
+                                    "report_year": str(year),
+                                    "reason": "source blocked; no further requests attempted"})
     for path in (manifest, unresolved):
         path.parent.mkdir(parents=True, exist_ok=True)
     with manifest.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=FIELDS)
         writer.writeheader()
-        for report in found:
+        for report in sorted(found, key=lambda r: (r.ticker, r.fiscal_year)):
             writer.writerow({field: getattr(report, field) for field in FIELDS})
     with unresolved.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=("company_name", "ticker", "isin", "report_year", "reason"))

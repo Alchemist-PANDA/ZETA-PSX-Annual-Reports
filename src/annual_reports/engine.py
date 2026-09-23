@@ -305,14 +305,19 @@ async def _fetch_one(
                     await rate_gates[family].wait()
                 if family == "sec" and sec_blocked.is_set():
                     raise TransferError("SEC 403 circuit open; inspect User-Agent and access rate", retryable=False)
+                default_ua = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
                 headers = {
-                    "Accept": "application/pdf", "Accept-Encoding": "identity",
-                    "User-Agent": settings.sec_user_agent if family == "sec" else "AnnualReportHarvester/0.1",
+                    "Accept": "application/pdf,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8",
+                    "Accept-Encoding": "identity",
+                    "User-Agent": settings.sec_user_agent if family == "sec" else default_ua,
                 }
                 auth = (settings.companies_house_key, "") if family == "companies_house" else None
                 async with session.stream(
                     "GET", current_url, headers=headers, auth=auth,
-                    timeout=settings.timeout_s, allow_redirects=False,
+                    timeout=max(settings.timeout_s, 30.0), allow_redirects=False,
                     impersonate="chrome",
                 ) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
