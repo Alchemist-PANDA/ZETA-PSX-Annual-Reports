@@ -50,8 +50,14 @@ benchmarks/results.jsonl
 benchmarks/champions.json
 benchmarks/render-runs/
 
-# Runtime directories
+# Runtime directories & production dataset management (stored on Google Drive)
 GLOBAL_SUSTAINABILITY_DATABASE/
 Pakistan-stock/
 ZETA-PSX-RUNTIME/
+_AUDITS/
+_FAILURES/
+_LOGS/
+_MANIFESTS/
+_SYSTEM/
+*[[]*[]]/
 
