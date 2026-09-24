@@ -1,0 +1,65 @@
+# Pakistan Companies — Example Input File
+# One company per line. Lines starting with # are comments.
+# You can use PSX ticker symbols, full company names, or aliases.
+
+# Banking
+HBL
+UBL
+MCB
+NBP
+BAFL
+MEBL
+ABL
+AKBL
+
+# Cement
+LUCK
+DGKC
+MLCF
+BWCL
+
+# Technology
+SYS
+NETSOL
+TRG
+
+# Oil & Gas
+OGDC
+PPL
+MARI
+PSO
+
+# Fertilizer
+ENGRO
+FFC
+EFERT
+
+# Pharma
+SEARL
+AGP
+
+# Power
+HUBC
+KEL
+
+# Textile
+ILP
+NML
+
+# Insurance
+AICL
+
+# Consumer
+COLG
+NESTLE
+UPFL
+
+# Automobile
+INDU
+PSMC
+
+# Steel
+ISL
+
+# Chemicals
+LOTCHEM

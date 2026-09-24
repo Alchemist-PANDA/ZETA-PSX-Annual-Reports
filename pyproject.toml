@@ -15,9 +15,11 @@ render = ["playwright>=1.50,<2"]
 
 [project.scripts]
 ar-harvest = "annual_reports.cli:main"
+zeta-pk = "annual_reports.pakistan.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]

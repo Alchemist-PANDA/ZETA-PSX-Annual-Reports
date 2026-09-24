@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urljoin, urlsplit
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
 from curl_cffi.requests import AsyncSession
 
 from .catalog import Report, _url
