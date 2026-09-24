@@ -1,176 +1,210 @@
-# US and UK annual and sustainability report harvester
+# ZETA-PSX: Autonomous Pakistan Stock Exchange Annual-Report Acquisition Engine
 
-For agent-run work, start with [AGENTS.md](AGENTS.md). It gives the exact workflow for English-language requests and the accuracy-gated speed experiment. A local benchmark can be started with `py benchmarks/optimize.py fixture`; real-source experiments require a reviewed `golden.csv` with `relative_path,sha256,pages` and `py benchmarks/optimize.py real --manifest sample.csv --golden golden.csv --repeats 2`. The script logs trials and promotes a faster setting only after all checks pass.
+Production-grade autonomous annual report acquisition system for the Pakistan Stock Exchange (PSX / `XKAR`), powered by the hardened **ZETA Core Architecture**.
 
-A local, resumable discovery and PDF ingestion system for US and UK annual reports, fiscal years 2017–2025. It follows the supplied **Phase-1 SOP: Folder & PDF File Naming Standard** and uses the two authoritative sources specified in `AR sources.txt`: SEC EDGAR and FCA NSM.
+---
 
-## Autonomous Agentic Two-Tier Pipeline & Permanent Google Drive Storage
+## 1. System Overview
 
-This repository is built for **autonomous AI agent execution across the wide stock universe** (spanning ~9,548 US issuers, ~3,191 UK issuers, and global dual-listed issuers). Whenever a user requests a cohort, exchange, or country folder, the agent executes the full pipeline end-to-end without manual CLI intervention:
+- **WHAT**: Fully autonomous acquisition, validation, deduplication, and Google Drive publishing engine for Pakistan Stock Exchange annual reports.
+- **PERIOD**: Fiscal Years **FY2017 – FY2025**.
+- **INPUT**: Company names, PSX symbols/tickers, or cohort text files (e.g. `companies.txt`).
+- **COMMAND**: `zeta-pk harvest companies.txt`
+- **OUTPUT**: Automatically detected Google Drive mount: `Google Drive\Pakistan stock\<Company Name> [<TICKER>]\FY<YYYY>\<Canonical_Filename>.pdf`
 
-1. **Permanent Direct-to-Google-Drive Storage (`GLOBAL_SUSTAINABILITY_DATABASE`)**:
-   - All final validated PDFs are permanently stored inside `GLOBAL_SUSTAINABILITY_DATABASE` (`C:\Users\CGS_Computer\Videos\annaual reportsssssss\GLOBAL_SUSTAINABILITY_DATABASE`), which is a Windows NTFS Directory Junction (`mklink /J`) pointing directly to **`G:\My Drive\GLOBAL_SUSTAINABILITY_DATABASE`** on Google Drive.
-   - To create the junction on a new machine:
-     ```cmd
-     cmd /c mklink /J "GLOBAL_SUSTAINABILITY_DATABASE" "G:\My Drive\GLOBAL_SUSTAINABILITY_DATABASE"
-     ```
-   - Keep `--state local/harvest.sqlite3` and `cache/` on local SSD for lock safety and zero cloud lock contention while `--output-root GLOBAL_SUSTAINABILITY_DATABASE` streams all verified PDFs straight to Google Drive.
-2. **Wide Universe Identifier Resolution**:
-   - Dynamically exclude already-harvested companies in `local/harvest.sqlite3` (`SELECT cik, lei FROM companies`) and resolve exact 20-character ISO 17442 `LEI`, 12-character ISO 6166 `ISIN`, `CIK`, `ticker`, and 4-character `MIC` (`XNAS`, `XNYS`, `XLON`) using the SEC active issuer roster (`https://www.sec.gov/files/company_tickers_exchange.json`), Wikidata datasets (`local/wikidata_dump.json`, `local/wikidata_us_dump.json`, `local/wikidata_nasdaq_nyse_dump.json`), the **GLEIF Golden Copy API** (`https://api.gleif.org/api/v1/lei-records/{lei}/isins`), and the **OpenFIGI API** (`POST https://api.openfigi.com/v3/mapping`).
-3. **Two-Tier High-Throughput Statutory Engine (`ar-harvest harvest-batch <universe.csv>`)**:
-   - **Priority 1 (US Companies & Dual-Listed Global/UK Issuers with SEC CIKs)**:
-     - **Method #1 (Direct Graphic PDF Passthrough)**: Concurrent download of official `Form ARS` PDFs (`16 workers`, `8 per_host`).
-     - **Method #2 (Self-Healing Headless Chromium Layout)**: Automatic fallback rendering of remaining `Form 10-K` and `Form 20-F` HTML filings via `render-sec` (`6 render workers` across `3 browser processes`, `90.0s` `page.pdf()` timeout guard, automatic `docs_handled = 999` + `make_context()` self-healing tab recovery, and immediate `cache_path.unlink(missing_ok=True)` cache pruning).
-   - **Priority 2 (UK Domestic Issuers beyond FTSE 100 without SEC CIKs)**:
-     - Sourced via the **UK FCA National Storage Mechanism (NSM)** (`import-fca-csv`, `import-fca-map`, `render-fca`).
-   - **Deprecated Last Resort (`AnnualReports.com`)**: Never use `AnnualReports.com` as a primary source; see the deprecated section at the bottom of this file for authorized fallback usage when explicitly requested.
-
-## Current scope
-
-- Countries: `USA` and `GBR`.
-- Input: a company-level identity roster containing LEI, ISIN, exchange and ticker, plus CIK for US companies. `AR sources.txt` and `SR sources.txt` are execution guides. The supplied country workbook has aggregate counts, not the individual companies. `file naming.txt` is empty.
-- US discovery: cached SEC bulk submissions ZIP, followed by only the historical submission JSON files needed for missing fiscal years. The SEC's `reportDate` determines the fiscal year; amendments stay separate.
-- UK discovery: import the CSV exported by the FCA NSM search interface, join by LEI, and leave ambiguous fiscal years for review. PDF, XHTML and ZIP originals are handled separately.
-- PDF acquisition: reviewed direct PDF links download concurrently. Official SEC HTML filings can be saved and locally rendered to PDF with a separate Chromium pool; the ledger records that conversion.
-- Output: PDF only, complete English reports, using the SOP's exact path and filename:
-
-  `GLOBAL_SUSTAINABILITY_DATABASE/GBR/XLON/2138007ZFQYRUSLU3J98_GB00BHJYC057_IHG/FY2024/2138007ZFQYRUSLU3J98_GBR_XLON_IHG_GB00BHJYC057_FY2024_AR_EN.pdf`
-
-The source catalog must identify the **fiscal year**, not publication year. `verified=true` in an imported PDF manifest means a person or trusted upstream process confirmed the identifiers, period, report type and complete English content. The downloader checks PDF structure and location; arbitrary PDF content can still need human review.
-
-The supplied self-improvement checklist mentions a `CATEGORY` subfolder, and `AR sources.txt` proposes `US_AAPL_2024_AR.html`. The updated V2 folder-and-file SOP explicitly requires the LEI/ISIN path and PDF name shown above. This repository follows the updated V2 SOP for every final PDF. Original SEC HTML is retained separately under `cache/`, not mislabeled as a source PDF.
-
-## Setup
-
-Python 3.11+:
-
-```powershell
-py -m venv .venv
-.venv\Scripts\python -m pip install -e ".[test,render]"
+```text
+USER: "Scrape these 100 companies."
+           │
+           ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ZETA-PSX AUTONOMOUS CORE                        │
+│                                                                        │
+│  1. Parse & Normalize Tickers / Names                                  │
+│  2. Resolve Exact Identity against PSX Historical Universe             │
+│  3. Determine Historical Eligibility (FY2017–FY2025 Matrix)            │
+│  4. Load Cached Company Source Profiles (Tier 0)                       │
+│  5. Fingerprint & Select Website Adapter (Deterministic Discovery)    │
+│  6. Classify Annual Reports vs Quarterlies/Half-Year/AGMs (Pass 1)     │
+│  7. High-Speed Host-Sharded Parallel Transfer (Bounded Concurrency)    │
+│  8. Multi-Stage Structural & Semantic Quality Validation               │
+│  9. Atomic Rename & Direct Publish to Google Drive                     │
+│ 10. Gap Matrix Computation & Targeted Pass 2 Recovery                 │
+│ 11. Comprehensive Audit Generation (_AUDITS, _MANIFESTS, _SYSTEM)     │
+└────────────────────────────────────────────────────────────────────────┘
+           │
+           ▼
+Google Drive: Verified Annual Report PDFs with Complete Auditable Provenance
 ```
 
-The `render` extra is needed for SEC HTML conversion. On Windows, the CLI detects installed Chrome or Edge. On other systems, pass `--chrome` or install a Playwright Chromium browser.
+---
 
-## Company universe and discovery
+## 2. Quickstart & Autonomous CLI
 
-Copy `examples/universe.csv` and add one listing per row. Its columns are `country,company_name,exchange,lei,isin,ticker,cik,aliases`. Use `USA` and `GBR`, the four-character exchange MIC, and the exact LEI/ISIN/ticker supplied by your data source. US rows require a numeric SEC CIK. `aliases` is optional text; leave it blank when unavailable.
+### Installation
 
-```powershell
-$env:SEC_USER_AGENT = "Your Organization research@example.org"
-ar-harvest load-universe companies.csv --years 2017:2025 --state harvest.sqlite3
-ar-harvest discover-us --state harvest.sqlite3
-ar-harvest import-fca-csv fca-nsm-export.csv --state harvest.sqlite3
-ar-harvest import-fca-map cache/fca/mapping.zip --state harvest.sqlite3
-ar-harvest status --state harvest.sqlite3
-ar-harvest export-manifest --state harvest.sqlite3
-```
-
-`discover-us` downloads the SEC bulk ZIP once to `cache/sec/submissions.zip`, reuses a fresh cached copy, and fetches only referenced history files for missing years. For offline testing, use `--bulk-zip path/to/submissions.zip --no-history`. Every SEC network request needs `SEC_USER_AGENT` with a real contact address. [SEC bulk API documentation](https://www.sec.gov/search-filings/edgar-application-programming-interfaces).
-
-Export UK NSM search results as CSV from the [FCA search interface](https://www.fca.org.uk/markets/primary-markets/regulatory-disclosures/national-storage-mechanism); the current [investor guide](https://www.fca.org.uk/publication/primary-market/nsm-investor-user-guide.pdf) says the export includes a document download link and permits up to 4,000 rows per export. Import multiple date/LEI shards by repeating `import-fca-csv`. The older NSM search API named in `AR sources.txt` returned `Invalid index` in a live check, and the FCA's [current FAQ](https://data.fca.org.uk/artefacts/PUBLISHING_HUB_FAQs_v0.1.pdf) says direct programmatic NSM access is not permitted. This repository uses the CSV export route.
-
-For historic Morningstar NSM links, download the [FCA migration mapping ZIP](https://data.fca.org.uk/artefacts/NSM/data-migration/MS_to_FCA_NSM_Document_URL_Mapping.zip) to `cache/fca/mapping.zip` and run `import-fca-map`. The default streams the 2017–2020 CSVs and stores only mappings needed by your candidate catalog; `--all` stores every mapping and needs much more disk space.
-
-SEC HTML filings are discovered but omitted from the direct-PDF manifest. Render those separately:
+Requires Python 3.11+:
 
 ```powershell
-ar-harvest render-sec --state harvest.sqlite3 --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-ar-harvest render-fca --state harvest.sqlite3 --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
+# Create and activate virtual environment
+python -m venv E:\ZETA-PSX-RUNTIME\.venv
+E:\ZETA-PSX-RUNTIME\.venv\Scripts\Activate.ps1
+
+# Install package with dependencies
+pip install -e ".[test]"
 ```
 
-`render-sec` downloads official SEC HTML with the SEC request limit, keeps the original source in `cache/sec/html/` during rendering (and automatically unlinks cached HTML upon commit), and produces a local PDF in the SOP path. `render-fca` preserves each FCA original in `cache/fca/originals/`; it passes through genuine PDFs and renders HTML/XHTML or a ZIP package's largest report page. Its FCA network concurrency starts at 4 and decreases on 429/503 responses. Both renderers block external page resources, so inspect a sample of converted reports for layout and missing images. Conversion provenance is kept in SQLite. Records with unresolved fiscal years remain in `status` for review.
-
-## Direct PDF downloads
-
-`export-manifest` writes only verified direct PDF candidates. You can also create a reviewed CSV from `examples/reports.csv`. Its columns are:
-
-| Column | Example | Meaning |
-| --- | --- | --- |
-| `country` | `GBR` | `GBR` or `USA` |
-| `exchange` | `XLON` | Four-character exchange MIC, supplied with the listing |
-| `lei` | `2138007ZFQYRUSLU3J98` | 20-character LEI |
-| `isin` | `GB00BHJYC057` | 12-character ISIN |
-| `ticker` | `IHG` | Supplied ticker |
-| `fiscal_year` | `FY2024` | Reporting year |
-| `report_type` | `AR` | SOP code, including `AR`, `10K`, `20F`, `IR` |
-| `language` | `EN` | Complete English report |
-| `pdf_url` | `https://.../report.pdf` | Direct PDF endpoint |
-| `source_page` | `https://.../reports` | Public page or filing where the link was found; may be blank |
-| `verified` | `true` | Confirmation of report identity and scope |
-
-Keep credentials in environment variables. For SEC-hosted URLs, set `SEC_USER_AGENT` to an organization name and contact email. Never put credentials into a CSV.
+### Health Check (`zeta-pk doctor`)
+Verify runtime environment, local storage, Google Drive mount, and external connectivity:
 
 ```powershell
-ar-harvest plan resolved-reports.csv
-ar-harvest run resolved-reports.csv --output-root "GLOBAL_SUSTAINABILITY_DATABASE" --state harvest.sqlite3
-ar-harvest verify --output-root "GLOBAL_SUSTAINABILITY_DATABASE" --state harvest.sqlite3
-ar-harvest benchmark --limit 200 --output-root "GLOBAL_SUSTAINABILITY_DATABASE" --state harvest.sqlite3
+zeta-pk doctor
 ```
 
-The SOP recommends storing the database on a non-system drive and keeping a backup (`GLOBAL_SUSTAINABILITY_DATABASE` points directly to `G:\My Drive\GLOBAL_SUSTAINABILITY_DATABASE`). `run` writes `run-summary.json` and `failures.csv` in the current directory. Re-running skips successful files whose recorded URL and file size match. If a process stopped after an atomic write but before its database update, the next run validates and recovers that file. `verify` performs full hash and page-tree checks. Use `--replace` only when intentionally replacing existing files.
+### Harvest a Cohort (`zeta-pk harvest`)
 
-`benchmark` downloads up to 200 pending discovered direct PDFs, displays live counts, records the run in SQLite, and appends `benchmark.csv`. It performs real downloads into the chosen final output path.
+Single company or list of tickers:
+```powershell
+zeta-pk harvest --companies "HBL,SYS,LUCK,MCB,ENGRO"
+```
 
-## Performance model
+Cohort file containing tickers or company names:
+```powershell
+zeta-pk harvest companies.txt
+```
 
-The default has 32 concurrent transfers and at most 2 per host. It interleaves hosts, caps each request at 15 seconds, sends retryable failures to a second pass, validates PDFs in memory, and writes each completed PDF once through a `.part` file and atomic rename. The default PDF size cap is 64 MiB per transfer. Adjust `--workers` to the available RAM and bandwidth; maximum possible in-flight PDF memory is roughly `workers × max-mib`, plus overhead. At 32 × 64 MiB that upper bound is high, so use a lower cap or worker count for memory-limited machines.
+Default behavior:
+- **Country**: `PAK`
+- **Exchange MIC**: `XKAR`
+- **Fiscal Years**: `2017:2025`
+- **Resumability**: Enabled (existing verified files skipped automatically)
+- **Source Hierarchy**: Official corporate issuer websites first
+- **Multi-Stage Validation**: Enabled
+- **Dataset Destination**: Automatically detected Google Drive desktop mount (`\Pakistan stock\`)
+- **Hot Runtime**: High-speed local SSD (`E:\ZETA-PSX-RUNTIME\local\`)
 
-Throughput is constrained by source bandwidth, file size and source access policies. The downloader does not promise a fixed number of PDFs per second. It respects the SEC's [10 requests/second fair access limit](https://www.sec.gov/about/webmaster-frequently-asked-questions) with a margin (8.8/second). An individual corporate host gets at most two concurrent transfers.
+---
 
-## Source strategy
+## 3. Architecture & Operational Integrity
 
-The [SEC submissions API](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) provides filing metadata, but many 10-K filings are HTML. The [FCA NSM](https://www.fca.org.uk/markets/primary-markets/regulatory-disclosures/national-storage-mechanism) holds UK annual financial reports, but many recent filings are structured XHTML or ZIP packages. [FCA guidance](https://www.fca.org.uk/markets/filing-structured-annual-financial-reports) distinguishes structured reports from PDF filings. These source formats determine the number of annual reports that can be ingested as original PDFs without local conversion.
+### A. Two-Pass Pipeline
+To protect the high-speed transfer queue from being starved by web discovery:
+1. **Pass 1 (Deterministic Discovery & Primary Download)**:
+   - Resolves identities, evaluates listing eligibility for FY2017–FY2025.
+   - Queries cached company source profiles (`company_source_profiles`).
+   - For unprofiled companies, fingerprints the issuer site and extracts candidates via deterministic adapters.
+   - Builds primary manifest and launches high-speed host-sharded concurrent transfer.
+2. **Pass 2 (Targeted Gap Recovery)**:
+   - Computes Company × Fiscal Year gap matrix (`company_year_matrix.csv`).
+   - Targets only unresolved cells (`MISSING`, `REVIEW`, `FAILED`).
+   - Leverages sitemaps, historical corporate aliases, and domain fallbacks.
+   - Transfers and validates gap recoveries into the dataset.
 
-The supplied workbook lists approximately 9,548 US and 3,191 UK companies, but contains no individual records. Supply the company roster before a full 2017–2025 run. Discovery status reports expected, found, missing, PDF-ready, non-PDF and manual-review counts; it never invents absent documents.
+### B. Two-Tier Storage Architecture
+- **GitHub Repository**: Stores **SOFTWARE ONLY** (source code, tests, configuration, fixtures, documentation, CI workflows). No bulk PDFs or runtime databases are tracked by Git.
+- **Google Drive**: Permanent destination for **DATA ONLY** (`\Pakistan stock\`). Verified reports are streamed directly to the Google Drive mount.
+- **Local SSD Runtime**: Hot SQLite database with Write-Ahead Logging (WAL), `.part` files, locks, and cache reside locally (e.g. `E:\ZETA-PSX-RUNTIME\local\harvest.sqlite3`) to eliminate cloud filesystem latency and lock contention. State backups are periodically checkpointed to Google Drive.
 
-## Sustainability pilot: first two companies
+```text
+Google Drive\Pakistan stock\
+│
+├── _SYSTEM/                  # Safe SQLite backups, source profiles, golden benchmarks
+├── _MANIFESTS/               # Primary run manifests and gap manifests
+├── _AUDITS/                  # Full provenance audits, failure records, run summaries
+├── _FAILURES/                # Quarantined non-compliant candidates
+├── _LOGS/                    # Execution logs
+│
+├── Habib Bank Limited [HBL]/
+│   ├── FY2017/               # Canonical annual report PDF
+│   ├── FY2018/
+│   └── ...
+└── Systems Limited [SYS]/
+    └── ...
+```
 
-`examples/sustainability-first-two.csv` contains Microsoft and Coca-Cola official PDF examples. They illustrate report-family changes; they are not the company limit. The general workflow below accepts any supplied US/UK universe and 2017–2025 metadata export. The full source strategy is in `docs/sustainability-pipeline.md`.
+---
 
-Create a company identity CSV using `examples/universe.csv`. Obtain an **authorized** bulk portal export, or create the same metadata format from official company archive links. Required columns are `company_name,ticker,isin,country,report_year,report_title,report_type,language,source_url,filename,page_count`. `source_url` is an HTTPS direct PDF URL when available; `filename` is an exact member path in a supplied bulk ZIP. Rows may have either or both. Country uses `USA` or `GBR`, and `report_year` uses `2017` through `2025`.
+## 4. Multi-Stage Validation & Quality Engine
+
+A report is never considered verified merely because an HTTP request succeeded or a PDF file opened. Candidates progress through a strict 10-stage pipeline:
+
+```text
+DISCOVERED ──► SOURCE_TRUSTED ──► IDENTITY_VALID ──► PERIOD_VALID ──► ANNUAL_REPORT_VALID
+                                                                             │
+PUBLISHED ◄── CONTENT_VALID ◄── HASH_VALID ◄── PDF_STRUCTURE_VALID ◄── DOWNLOADED
+```
+
+### Explicit Failure Categories
+Non-compliant candidates are rejected with explicit audit tags:
+- `WRONG_ISSUER`: Content does not match requested corporate identity.
+- `WRONG_FISCAL_YEAR`: Publication date misidentified as accounting period.
+- `QUARTERLY_NOT_ANNUAL`: 1st, 2nd, 3rd quarter report detected.
+- `HALF_YEAR_NOT_ANNUAL`: Interim half-yearly report detected.
+- `NINE_MONTH_NOT_ANNUAL`: 9-month financial accounts detected.
+- `AGM_DOCUMENT` / `PROXY_DOCUMENT`: AGM notices or proxy voting forms.
+- `CORRUPT_PDF` / `TRUNCATED_PDF`: Damaged PDF trailer or incomplete stream.
+- `HTML_INSTEAD_OF_PDF`: Captive portal, 404 HTML, or Cloudflare challenge.
+- `DUPLICATE`: Identical SHA-256 already recorded for another slot.
+
+### Fiscal-Year Intelligence
+Accounting periods rarely match calendar upload dates (e.g., Year ended June 30, 2024 = `FY2024`, even if uploaded in October 2024). The engine extracts accounting period end-dates and anchors strictly to the issuer's fiscal year cycle.
+
+---
+
+## 5. Source Hierarchy & Adaptive Learning
+
+1. **TIER 0**: Previously verified company source profile (`company_source_profiles` cache).
+2. **TIER 1**: Official corporate Annual Report / Investor Relations archive page.
+3. **TIER 2**: Other official financial pages on corporate website.
+4. **TIER 3**: Official corporate CDN / subdomains.
+5. **TIER 4**: Authorized exchange / regulatory disclosures.
+6. **TIER 5**: Domain-restricted search discovery (`site:company.com`).
+7. **TIER 6**: Legitimate digital web archives of official sources.
+8. **TIER 7**: Reliable secondary repositories.
+
+### Reusable Deterministic Adapters
+Websites are parsed using dedicated adapters rather than generic scraping:
+- `StaticYearArchiveAdapter`: Multi-year tables and card layouts.
+- `InvestorRelationsAdapter`: Financial reports and statutory portals.
+- `WordPressMediaAdapter`: Dynamic media library uploads (`/wp-content/uploads/YYYY/MM/`).
+- `SitemapAdapter`: XML sitemaps filtered for report PDF patterns.
+- `GenericAnchorAdapter`: Heuristic anchor parsing with positive/negative weighting.
+- `DirectPdfAdapter`: Direct PDF endpoint verification.
+- `JavascriptDiscoveryAdapter`: Headless browser fallback for SPA-driven portals.
+
+---
+
+## 6. Benchmarking & Concurrency Optimization
+
+The system implements the **Performance Champion Rule**: a concurrency configuration becomes the production default *only* if 100% of correctness tests pass, 100% of golden reports match, and median throughput improves.
 
 ```powershell
-ar-harvest sr-import companies.csv authorized-metadata.csv --years 2017:2025
-ar-harvest plan sr-direct.csv
-ar-harvest run sr-direct.csv --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-ar-harvest sr-ingest-zip authorized-bulk.zip --index sr-bulk-index.csv --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
+# Run concurrency sweep across 32, 48, 64, 80 workers
+zeta-pk optimize
+
+# Run golden set verification benchmark
+zeta-pk benchmark
 ```
 
-`sr-import` joins by exact country and ISIN, classifies standalone sustainability/ESG/CSR, integrated reports, and topic updates, and writes ambiguous or unmatched rows to `sr-review.csv`. Conflicting reports for the same SOP path go to review. It creates the full URL manifest before `run` starts. `sr-ingest-zip` reads only listed members, caps member size, verifies PDF structure, hashes the bytes, writes atomically to the SOP path, and records results in SQLite. The portal itself does not expose an authorized automation API in this repository; obtain its metadata and ZIP through your licensed workflow. Official archive URLs can use the same metadata import format. Report availability and access depend on the supplied universe and source exports.
+Host performance is tracked continuously in the `host_stats` SQLite ledger to dynamically adjust per-host concurrency and back off upon receiving HTTP 429 or 5xx responses.
 
-## Development
+---
+
+## 7. Upstream US & UK Core Architecture
+
+This repository preserves the upstream **ZETA Core Engine** for statutory filings across US (SEC EDGAR) and UK (FCA NSM) capital markets:
+
+- **US Ingestion**: SEC EDGAR Form 10-K, 20-F, and Form ARS via bulk submissions API and headless Chromium layout rendering.
+- **UK Ingestion**: FCA National Storage Mechanism (NSM) structured XHTML, PDF, and ZIP filing ingest.
+- **Upstream CLI**: `ar-harvest` commands remain fully accessible and functional.
+
+---
+
+## 8. Development & Continuous Integration
+
+Run the test suite across unit, validation, fiscal-year, identity, and resume tests:
 
 ```powershell
-.venv\Scripts\python -m pytest -q
-.venv\Scripts\python benchmarks\local_batch.py --count 100
-.venv\Scripts\python benchmarks\local_batch.py --count 100 --image-side 1024
+pytest -v
 ```
 
-`--allow-http` exists only to run local HTTP integration tests. Production manifests should use HTTPS.
-The benchmark serves synthetic PDFs from localhost. The image option creates roughly 3 MiB files. Its throughput is a regression check for the local pipeline, not a prediction for remote hosts.
-
-## AnnualReports.com source option (Deprecated / Absolute Last Resort)
-
-> **⚠️ DEPRECATION & PRIORITY NOTICE**: `AnnualReports.com` is **deprecated as a primary extraction method** and must **only be used as the absolute last option** when explicitly requested by the user or after SEC EDGAR, FCA NSM, and official corporate IR archives have been completely exhausted.
-
-When the task explicitly requests AnnualReports.com, `annualreports-discover` searches the site's company pages, verifies ticker and exchange against the supplied universe, and resolves the listed years and PDF links into one SOP-compliant manifest. It caches page HTML for seven days and writes missing or ambiguous company-years to `annualreports-unresolved.csv`. Discovery finishes before downloading starts. The existing concurrent engine then transfers PDFs, follows the site's recent-report redirects, validates page trees, hashes files, and writes atomic SOP names.
-
-```powershell
-ar-harvest annualreports-discover companies.csv --years 2017:2025
-ar-harvest plan annualreports-direct.csv
-ar-harvest run annualreports-direct.csv --authorized-hosted --workers 32 --per-host 2 --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-ar-harvest verify --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-ar-harvest annualreports-audit companies.csv annualreports-direct.csv --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-```
-
-The `--authorized-hosted` flag explicitly enables automated AnnualReports.com PDF transfers when your access permits them. Start at two connections per host and tune with the accuracy-gated benchmark. Inspect `annualreports-unresolved.csv` and use SEC/FCA or official company archives for gaps. `annualreports-audit` checks readable opening and ending pages for company and fiscal-year clues and writes `annualreports-content-review.csv`; flagged files need review, especially scanned PDFs. Discovery never guesses PDF URLs or downloads files while resolving company pages.
-
-For an authorized metadata export or vendor-provided ZIP, use `annualreports-import` and `annualreports-ingest-zip` instead. The normalized metadata CSV columns are `country,isin,report_year,report_title,pdf_url,zip_member,source_page`. Match the supplied universe by exact country and ISIN. `pdf_url` is a direct HTTPS PDF URL; `zip_member` is the exact path inside an authorized ZIP. At least one is required. The importer writes an SOP-compliant direct manifest, a bulk ZIP index, and a review CSV before transfer.
-
-```powershell
-ar-harvest annualreports-import companies.csv annualreports-metadata.csv
-ar-harvest annualreports-ingest-zip authorized-annualreports.zip --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-ar-harvest run annualreports-direct.csv --output-root "GLOBAL_SUSTAINABILITY_DATABASE"
-```
-
-AnnualReports.com [lists annual PDFs by company and year](https://www.annualreports.com/Company/microsoft-corporation), but no public bulk ZIP/API is documented on its [site information](https://www.annualreports.com/About). Its [robots.txt](https://www.annualreports.com/robots.txt) disallows automated HostedData PDF access. Use the hosted transfer flag only with access that permits automation. The implementation does not evade blocks or use proxies. A ZIP supplied through authorized access is ingested locally. Individual remote PDFs still require individual transfers; no fixed seconds-per-hundred rate can be promised.
+GitHub Actions automatically executes the comprehensive test matrix on push and pull request via `.github/workflows/tests.yml`.

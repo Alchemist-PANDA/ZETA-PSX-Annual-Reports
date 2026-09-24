@@ -118,8 +118,17 @@ class PakistanCompany:
             return True
         if q == self.company_name.upper():
             return True
+
+        # Strip common corporate suffixes for robust matching (e.g. 'Lucky Cement' -> 'Lucky Cement Limited')
+        def clean_name(n: str) -> str:
+            return re.sub(r"\b(LIMITED|LTD|COMPANY|CO)\b", "", n, flags=re.IGNORECASE).strip().upper()
+
+        q_clean = clean_name(q)
+        if q_clean and q_clean == clean_name(self.company_name):
+            return True
+
         for alias in self.aliases + self.historical_names + self.historical_symbols:
-            if q == alias.upper():
+            if q == alias.upper() or (q_clean and q_clean == clean_name(alias)):
                 return True
         return False
 

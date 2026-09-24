@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "annual-report-harvester"
-version = "0.1.0"
-description = "SOP-compliant, concurrent PDF collection for US and UK annual reports"
+version = "1.0.0"
+description = "Production-grade autonomous Pakistan Stock Exchange annual-report acquisition system (ZETA Core)"
 requires-python = ">=3.11"
 dependencies = ["curl_cffi>=0.11,<1", "PyMuPDF>=1.25,<2", "httpx>=0.27,<1", "rich>=13,<15", "beautifulsoup4>=4.12,<5"]
 
@@ -21,5 +21,4 @@ zeta-pk = "annual_reports.pakistan.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]

@@ -257,58 +257,36 @@ async def _scan_page_for_pdfs(
     target_years: list[int],
     source_tier: int,
     http_get: Any,
+    preferred_adapter: str = "",
 ) -> list[Candidate]:
-    """Fetch a page and extract PDF link candidates."""
+    """Fetch a page, fingerprint adapter, and extract PDF link candidates."""
+    from .adapters import fingerprint_website, get_adapter
+
     candidates: list[Candidate] = []
 
     status, html = await http_get(page_url)
     if status != 200 or not html:
         return candidates
 
-    soup = BeautifulSoup(html, "html.parser")
+    adapter_name = preferred_adapter or fingerprint_website(html, page_url)
+    adapter = get_adapter(adapter_name)
 
-    for anchor in soup.find_all("a", href=True):
-        href = anchor["href"]
-        full_url = urljoin(page_url, href)
-
-        if not _is_pdf_url(full_url):
+    disc_candidates = adapter.extract_candidates(html, page_url, target_years)
+    for dc in disc_candidates:
+        if not _url(dc.pdf_url, allow_http=False):
             continue
 
-        if not _url(full_url, allow_http=False):
-            continue
-
-        link_text = anchor.get_text(strip=True)
-        # Decode URL path for better classification
-        from urllib.parse import unquote
-        decoded_url = unquote(full_url)
-        context = f"{link_text} {decoded_url}"
-
-        # Classify
-        classification = classify_annual_report(context)
-        if classification == "NOT_ANNUAL":
-            continue  # Skip obvious non-annual documents
-
-        # Extract fiscal year
-        fy = extract_fiscal_year(context)
-        if fy is None:
-            fy = _extract_year_from_url(full_url)
-
-        # Only keep candidates for target years
-        if fy is not None and fy not in target_years:
-            continue
-
-        period_end = determine_period_end(context)
-
-        candidates.append(Candidate(
+        c = Candidate(
             company=company,
-            pdf_url=full_url,
-            source_page=page_url,
-            link_text=link_text,
-            fiscal_year=fy,
+            pdf_url=dc.pdf_url,
+            source_page=dc.source_page,
+            link_text=dc.link_text,
+            fiscal_year=dc.fiscal_year,
             source_tier=source_tier,
-            classification=classification,
-            period_end=period_end,
-        ))
+            classification=dc.classification,
+            period_end=dc.period_end,
+        )
+        candidates.append(c)
 
     return candidates
 

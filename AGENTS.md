@@ -46,6 +46,23 @@ This benchmarks copies of real cached filings and checks page count, full extrac
 
 Do not sequentially pre-download all HTML: `render-sec` already overlaps fetching and rendering. Use `--universe` for cohort-scoped HTML runs. Resume without `--replace`; do not count previously downloaded/skipped reports in fresh throughput. Keep one SEC acquisition gate across concurrent work: do not multiply its allowance with multiple CLI invocations or machines. CPU-only rendering of disjoint cached batches can be distributed. Review `docs/throughput_engineering_report.md` for measured limitations and deadline planning.
 
+## Pakistan (PSX) Autonomous Agent Invariants (Non-Negotiable)
+
+When the user asks to scrape or harvest Pakistani companies (e.g., *"Scrape these 100 companies"*, *"Harvest PSX annual reports"*), the agent MUST execute the pipeline autonomously without asking unnecessary questions or requesting manual assistance:
+
+1. **NO URL REQUESTS**: Must NOT ask the user for report URLs, landing pages, or investor relations links.
+2. **NO FOLDER CREATION**: Must NOT ask the user to create company folders, FY folders, or Google Drive directories. All structures are created automatically.
+3. **NO MANUAL REPORT RESEARCH**: Must NOT ask the user to research annual reports manually. The system's deterministic adapters and tiered discovery discover official documents automatically.
+4. **NO INVENTED IDENTIFIERS**: Must NEVER fabricate LEI or ISIN numbers. When genuine ISO identifiers are unknown, use the system's deterministic internal fallbacks (`XPAK...`).
+5. **NO QUARTERLY SUBSTITUTIONS**: A quarterly report, half-year report, or AGM notice must NEVER substitute for an annual report.
+6. **NO SILENT ABANDONMENT**: Missing years must be explicitly tracked in the `company_year_matrix.csv` with granular statuses (`NOT_LISTED`, `DELISTED`, `MISSING`, `REVIEW`, `FAILED`).
+7. **AUTONOMOUS RESUMABILITY**: Always resume from prior state (`--resume`). Completed and verified files on Google Drive are skipped; unfinished or interrupted files are recovered safely.
+8. **OFFICIAL ISSUER SOURCES FIRST**: Follow the strict source priority hierarchy (TIER 0 profile -> TIER 1 official AR/IR archive -> TIER 2 official domain -> TIER 3 CDN -> TIER 5 search fallback). Never allow secondary sources to outrank official reports.
+9. **REUSE CACHED SOURCE PROFILES**: Check `company_source_profiles` first. Learn each company once and reuse the adapter on subsequent runs.
+10. **PERMANENT GOOGLE DRIVE STORAGE**: All final validated PDFs must be published directly to Google Drive under `\Pakistan stock\<Company [SYMBOL]>\FY<year>\`. Keep hot SQLite databases, caches, and temporary `.part` files on local fast storage.
+11. **COMPREHENSIVE AUDIT**: Every harvest run must conclude with auditable execution records in `_AUDITS/` (`company-audit.csv`, `failure-audit.csv`, `run-summary-<ts>.json`) and a verified clean folder structure.
+
 ## Known limits
 
 The repository does not contain a universal company roster or licensed bulk portal credentials. The portal export and ZIP must be obtained through authorized access. Official corporate archives have no universal API; agents must resolve missing links from each company's official archive. Structural PDF validation proves transfer integrity; semantic report identity needs trusted metadata and review.
+

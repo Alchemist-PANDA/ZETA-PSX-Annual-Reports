@@ -1,7 +1,7 @@
 """Pakistan CLI entry point (``zeta-pk``).
 
-Provides ``harvest``, ``doctor``, ``status`` subcommands without breaking
-the existing ``ar-harvest`` CLI.
+Provides ``harvest``, ``optimize``, ``benchmark``, ``doctor``, and ``status``
+subcommands without breaking the existing ``ar-harvest`` CLI.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from .config import PakistanConfig, detect_google_drive, get_pakistan_root, DEFAULT_YEARS
-from .config import build_environment_manifest, save_environment_manifest
+from .benchmark import run_benchmark, optimize_concurrency, get_current_git_sha
 
 
 console = Console(safe_box=True)
@@ -43,14 +43,19 @@ def _parse_years(value: str) -> list[int]:
 
 def cmd_harvest(args: argparse.Namespace) -> None:
     """Run the Pakistan annual-report harvest pipeline."""
-    companies = _parse_companies(args.companies)
+    raw_comp = args.companies or args.companies_opt
+    if not raw_comp:
+        console.print("[red]No companies specified. Specify a company file or use --companies.[/red]")
+        sys.exit(1)
+
+    companies = _parse_companies(raw_comp)
     if not companies:
-        console.print("[red]No companies specified.[/red]")
+        console.print("[red]No valid company symbols or names parsed.[/red]")
         sys.exit(1)
 
     years = _parse_years(args.years) if args.years else list(DEFAULT_YEARS)
 
-    console.print(f"\n[bold cyan]ZETA Pakistan Harvester[/bold cyan]")
+    console.print(f"\n[bold cyan]ZETA Pakistan Autonomous Harvester[/bold cyan]")
     console.print(f"  Companies: {len(companies)}")
     console.print(f"  Years:     FY{min(years)}–FY{max(years)}")
     console.print(f"  Workers:   {args.workers}")
@@ -123,81 +128,139 @@ def cmd_harvest(args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def cmd_optimize(args: argparse.Namespace) -> None:
+    """Run performance optimization experiments across candidate worker counts."""
+    config = PakistanConfig.auto(
+        output_root=Path(args.output_root) if args.output_root else None,
+        per_host=args.per_host,
+    )
+    workers_list = [int(w.strip()) for w in args.workers.split(",") if w.strip()] if args.workers else [32, 48, 64, 80]
+    optimize_concurrency(config, candidate_workers=workers_list, per_host=args.per_host)
+
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    """Execute reproducible benchmark against the Pakistan Golden Corpus."""
+    config = PakistanConfig.auto(
+        output_root=Path(args.output_root) if args.output_root else None,
+        workers=args.workers,
+        per_host=args.per_host,
+    )
+    console.print(f"\n[bold cyan]Running Pakistan Golden Corpus Benchmark[/bold cyan]\n")
+    res = run_benchmark(config, workers=args.workers, per_host=args.per_host)
+
+    table = Table(title="Benchmark Execution Telemetry", show_header=True, header_style="bold magenta")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right", style="green")
+    table.add_row("Timestamp", res.timestamp)
+    table.add_row("Commit SHA", res.commit_sha[:10])
+    table.add_row("Worker Concurrency", str(res.workers))
+    table.add_row("Per-host Concurrency", str(res.per_host))
+    table.add_row("Golden Reports", str(res.report_count))
+    table.add_row("Elapsed Time", f"{res.elapsed_s:.2f}s")
+    table.add_row("Throughput (PDFs/s)", f"{res.pdfs_per_sec:.2f}")
+    table.add_row("Bandwidth (MiB/s)", f"{res.mibs_per_sec:.2f}")
+    table.add_row("Peak RAM", f"{res.peak_ram_mb:.1f} MB")
+    table.add_row("CPU Load", f"{res.cpu_percent:.1f}%")
+    table.add_row("Errors (429/5xx)", f"{res.http_429_count}/{res.http_5xx_count}")
+    table.add_row("Golden Pass Rate", f"{res.golden_pass_rate:.1f}%")
+    console.print(table)
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
-    """Run health checks on the Pakistan harvest environment."""
-    console.print("\n[bold cyan]ZETA Pakistan — Doctor[/bold cyan]\n")
+    """Run health checks on the Pakistan harvest environment (Requirement 43)."""
+    console.print("\n[bold cyan]ZETA Pakistan — Doctor (Health Checks)[/bold cyan]\n")
 
     checks: list[tuple[str, str, str]] = []  # (name, status, detail)
 
-    # Google Drive
+    # 1. Google Drive for Desktop detected
     drive = detect_google_drive()
     if drive:
-        checks.append(("Google Drive", "PASS", str(drive)))
+        checks.append(("Google Drive for Desktop", "PASS", str(drive)))
     else:
-        checks.append(("Google Drive", "FAIL", "Not detected"))
+        checks.append(("Google Drive for Desktop", "WARN", "Not detected; local fallback will be used"))
 
-    # Pakistan stock root
+    # 2. Drive root writable
+    if drive and drive.is_dir():
+        try:
+            test_file = drive / ".zeta_doctor_test.tmp"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink()
+            checks.append(("Drive Root Writable", "PASS", "Writable"))
+        except Exception as exc:
+            checks.append(("Drive Root Writable", "WARN", f"Read-only or restricted: {exc}"))
+
+    # 3. Pakistan stock root exists
     try:
         root = get_pakistan_root(drive)
         if root.is_dir():
             checks.append(("Pakistan Stock Root", "PASS", str(root)))
         else:
-            checks.append(("Pakistan Stock Root", "WARN", "Directory doesn't exist yet"))
+            checks.append(("Pakistan Stock Root", "WARN", f"Will be created at {root}"))
     except Exception as exc:
-        checks.append(("Pakistan Stock Root", "FAIL", str(exc)))
+        checks.append(("Pakistan Stock Root", "WARN", str(exc)))
 
-    # Local runtime
+    # 4. Local runtime writable
     local_rt = Path("E:/ZETA-PSX-RUNTIME")
     if local_rt.is_dir():
-        checks.append(("Local Runtime", "PASS", str(local_rt)))
+        try:
+            t_f = local_rt / ".zeta_doctor_test.tmp"
+            t_f.write_text("ok", encoding="utf-8")
+            t_f.unlink()
+            checks.append(("Local Runtime", "PASS", f"{local_rt} (writable)"))
+        except Exception:
+            checks.append(("Local Runtime", "WARN", f"{local_rt} (not writable)"))
     else:
-        local_rt = Path(os.environ.get("LOCALAPPDATA", "C:/Users")) / "ZETA-PSX-RUNTIME"
-        checks.append(("Local Runtime", "WARN", f"Using {local_rt}"))
+        checks.append(("Local Runtime", "WARN", f"{local_rt} not found"))
 
-    # Python version
+    # 5. SQLite health
+    try:
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE test (id INT)")
+        conn.close()
+        checks.append(("SQLite Engine", "PASS", f"SQLite {sqlite3.sqlite_version} (WAL supported)"))
+    except Exception as exc:
+        checks.append(("SQLite Engine", "FAIL", str(exc)))
+
+    # 6. Python version
     import platform
     py_ver = platform.python_version()
     major, minor = int(py_ver.split(".")[0]), int(py_ver.split(".")[1])
     if major >= 3 and minor >= 11:
-        checks.append(("Python", "PASS", py_ver))
+        checks.append(("Python Version", "PASS", f"Python {py_ver}"))
     else:
-        checks.append(("Python", "FAIL", f"{py_ver} (need 3.11+)"))
+        checks.append(("Python Version", "FAIL", f"{py_ver} (requires >= 3.11)"))
 
-    # Dependencies
+    # 7. Package dependencies
     for pkg in ["curl_cffi", "pymupdf", "httpx", "rich", "bs4"]:
         try:
             __import__(pkg)
-            checks.append((f"Package: {pkg}", "PASS", "installed"))
+            checks.append((f"Package: {pkg}", "PASS", "Installed"))
         except ImportError:
-            checks.append((f"Package: {pkg}", "FAIL", "missing"))
+            checks.append((f"Package: {pkg}", "FAIL", "Missing"))
 
-    # Browser (optional)
-    import shutil
-    chrome = shutil.which("chrome") or shutil.which("google-chrome")
-    edge = shutil.which("msedge")
-    if chrome or edge:
-        checks.append(("Browser", "PASS", chrome or edge or ""))
-    else:
-        checks.append(("Browser", "WARN", "No Chrome/Edge found (optional)"))
-
-    # Disk space
+    # 8. Free disk space
     import shutil as sh
     for disk, label in [("E:\\", "E: SSD"), ("C:\\", "C: System")]:
         try:
             usage = sh.disk_usage(disk)
             free_gb = usage.free / (1024**3)
-            status = "PASS" if free_gb > 1 else ("WARN" if free_gb > 0.2 else "FAIL")
-            checks.append((f"Disk {label}", status, f"{free_gb:.1f} GB free"))
+            status = "PASS" if free_gb > 1.0 else ("WARN" if free_gb > 0.2 else "FAIL")
+            checks.append((f"Disk Space ({label})", status, f"{free_gb:.1f} GB free"))
         except Exception:
-            checks.append((f"Disk {label}", "WARN", "Cannot check"))
+            pass
 
-    # Network
+    # 9. Network connectivity
     try:
         import socket
-        socket.create_connection(("dns.google", 443), timeout=5).close()
-        checks.append(("Network", "PASS", "Internet reachable"))
+        socket.create_connection(("1.1.1.1", 53), timeout=3).close()
+        checks.append(("Network Connectivity", "PASS", "Internet reachable"))
     except Exception:
-        checks.append(("Network", "FAIL", "Cannot reach internet"))
+        checks.append(("Network Connectivity", "WARN", "Internet unreachable / offline test mode"))
+
+    # 10. Git baseline
+    sha = get_current_git_sha()
+    checks.append(("Git Baseline SHA", "PASS" if sha != "UNKNOWN" else "WARN", sha[:12]))
 
     # Display results
     table = Table(show_header=True, header_style="bold")
@@ -211,49 +274,43 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     console.print(table)
 
-    # Overall
     statuses = [s for _, s, _ in checks]
     if "FAIL" in statuses:
-        console.print("\n[red bold]FAIL — Critical issues found.[/red bold]")
+        console.print("\n[red bold]FAIL — Critical environment issues found.[/red bold]")
         sys.exit(1)
     elif "WARN" in statuses:
-        console.print("\n[yellow bold]WARN — Some warnings, but functional.[/yellow bold]")
+        console.print("\n[yellow bold]WARN — System functional with warnings.[/yellow bold]")
     else:
-        console.print("\n[green bold]PASS — All checks passed.[/green bold]")
+        console.print("\n[green bold]PASS — All system checks passed cleanly.[/green bold]")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Show current harvest status and gap matrix."""
-    try:
-        config = PakistanConfig.auto()
-    except EnvironmentError as exc:
-        console.print(f"[red]{exc}[/red]")
-        sys.exit(1)
-
+    config = PakistanConfig.auto()
     profile_db = config.local_runtime / "local" / "source-profiles.sqlite3"
     if not profile_db.is_file():
         console.print("[yellow]No harvest state found. Run 'zeta-pk harvest' first.[/yellow]")
         return
 
-    from .source_profile import SourceProfileStore
+    from .source_profiles import SourceProfileStore
     store = SourceProfileStore(profile_db)
 
     profiles = store.all_profiles()
-    console.print(f"\n[bold cyan]Source Profiles:[/bold cyan] {len(profiles)}")
+    console.print(f"\n[bold cyan]Learned Source Profiles:[/bold cyan] {len(profiles)}")
 
     if profiles:
         table = Table(show_header=True, header_style="bold")
         table.add_column("Symbol", style="cyan")
         table.add_column("Company")
-        table.add_column("AR Page")
+        table.add_column("Adapter")
         table.add_column("Confidence")
 
-        for p in profiles[:20]:
+        for p in profiles[:25]:
             table.add_row(
-                p.get("psx_symbol", ""),
-                p.get("company_name", ""),
-                p.get("annual_report_page", "")[:60],
-                p.get("confidence", ""),
+                p.get("ticker", ""),
+                p.get("current_name", ""),
+                p.get("adapter_type", "GenericAnchorAdapter"),
+                p.get("confidence", "HIGH"),
             )
         console.print(table)
 
@@ -269,13 +326,26 @@ def parser() -> argparse.ArgumentParser:
 
     # harvest
     h = commands.add_parser("harvest", help="Harvest annual reports for Pakistan companies")
-    h.add_argument("companies", help="Comma-separated tickers/names or path to text/CSV file")
+    h.add_argument("companies", nargs="?", default=None, help="Company list file (e.g. companies.txt) or comma-separated symbols")
+    h.add_argument("--companies", dest="companies_opt", default=None, help="Comma-separated tickers (e.g. 'HBL,UBL,MCB')")
     h.add_argument("--years", default=None, help="Year range, e.g. 2017:2025 (default: 2017:2025)")
     h.add_argument("--workers", type=int, default=48, help="Concurrent download workers")
     h.add_argument("--per-host", type=int, default=2, help="Max concurrent per host")
     h.add_argument("--output-root", default=None, help="Override output root")
     h.add_argument("--state", default=None, help="Override state DB path")
     h.add_argument("--resume", action="store_true", default=True, help="Resume from previous state (default)")
+
+    # optimize
+    opt = commands.add_parser("optimize", help="Run concurrency and throughput optimization experiments")
+    opt.add_argument("--workers", default="32,48,64,80", help="Comma-separated candidate worker counts")
+    opt.add_argument("--per-host", type=int, default=2, help="Per host concurrency setting")
+    opt.add_argument("--output-root", default=None, help="Override output root")
+
+    # benchmark
+    bm = commands.add_parser("benchmark", help="Execute reproducible benchmark against the Pakistan Golden Corpus")
+    bm.add_argument("--workers", type=int, default=48, help="Worker concurrency")
+    bm.add_argument("--per-host", type=int, default=2, help="Per-host concurrency")
+    bm.add_argument("--output-root", default=None, help="Override output root")
 
     # doctor
     commands.add_parser("doctor", help="Run environment health checks")
@@ -290,6 +360,10 @@ def main() -> None:
     args = parser().parse_args()
     if args.command == "harvest":
         cmd_harvest(args)
+    elif args.command == "optimize":
+        cmd_optimize(args)
+    elif args.command == "benchmark":
+        cmd_benchmark(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "status":

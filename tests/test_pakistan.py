@@ -349,3 +349,159 @@ class TestFailureScenarios:
         c2 = PakistanCompany(company_name="Test B", psx_symbol="TSTB")
         assert c1.effective_lei != c2.effective_lei
         assert c1.effective_isin != c2.effective_isin
+
+
+# ── Identity & Fiscal Year Intelligence ───────────────────────────────────
+
+class TestIdentityAndFiscalYear:
+    def test_ticker_normalization(self):
+        from annual_reports.pakistan.identity import normalize_ticker
+        assert normalize_ticker("psx:hbl") == "HBL"
+        assert normalize_ticker("XKAR:SYS") == "SYS"
+        assert normalize_ticker("[LUCK]") == "LUCK"
+        assert normalize_ticker("  mcb  ") == "MCB"
+
+    def test_genuine_id_verification(self):
+        from annual_reports.pakistan.identity import is_genuine_isin, is_genuine_lei
+        assert is_genuine_isin("PK0078801017")
+        assert not is_genuine_isin("XPAK00000000")
+        assert not is_genuine_isin("US0378331005")  # Not Pakistan
+        assert is_genuine_lei("549300GKFG0RYRRQ1414")
+        assert not is_genuine_lei("XPAK1234567890ABCDEF")
+
+    def test_expected_company_years_eligibility(self):
+        from annual_reports.pakistan.fiscal_year import determine_company_year_eligibility
+        # Octopus listed Oct 2021
+        st_2018, _ = determine_company_year_eligibility(2018, listing_date="2021-10-11")
+        assert st_2018 == "NOT_LISTED"
+        st_2022, _ = determine_company_year_eligibility(2022, listing_date="2021-10-11")
+        assert st_2022 == "ELIGIBLE"
+        # Suzuki delisted May 2024
+        st_delist, _ = determine_company_year_eligibility(2025, delisting_date="2024-05-06")
+        assert st_delist == "DELISTED"
+
+
+# ── Adapters & Fingerprinting ─────────────────────────────────────────────
+
+class TestAdapters:
+    def test_fingerprint_wordpress(self):
+        from annual_reports.pakistan.adapters import fingerprint_website
+        html = '<link rel="stylesheet" href="https://example.com/wp-content/themes/theme.css">'
+        assert fingerprint_website(html, "https://example.com") == "WordPressMediaAdapter"
+
+    def test_fingerprint_sitemap(self):
+        from annual_reports.pakistan.adapters import fingerprint_website
+        html = '<?xml version="1.0"?><urlset xmlns="..."></urlset>'
+        assert fingerprint_website(html, "https://example.com/sitemap.xml") == "SitemapAdapter"
+
+    def test_static_year_archive_adapter(self):
+        from annual_reports.pakistan.adapters import StaticYearArchiveAdapter
+        html = """
+        <div>
+            <h3>2024</h3>
+            <a href="/reports/ar2024.pdf">Annual Report</a>
+        </div>
+        """
+        adapter = StaticYearArchiveAdapter()
+        candidates = adapter.extract_candidates(html, "https://example.com", [2024])
+        assert len(candidates) == 1
+        assert candidates[0].fiscal_year == 2024
+        assert candidates[0].pdf_url == "https://example.com/reports/ar2024.pdf"
+
+
+# ── Multi-Stage Validation & Failure Categories ───────────────────────────
+
+class TestValidation:
+    def test_corrupt_pdf_rejection(self):
+        from annual_reports.pakistan.validation import validate_pdf_content, FailureCategory
+        res = validate_pdf_content(b"not a pdf at all")
+        assert not res.is_valid
+        assert res.failure_category == FailureCategory.CORRUPT_PDF
+
+    def test_html_instead_of_pdf(self):
+        from annual_reports.pakistan.validation import validate_pdf_content, FailureCategory
+        html = b"<!DOCTYPE html><html><head><title>404</title></head><body>Not found</body></html>"
+        res = validate_pdf_content(html)
+        assert not res.is_valid
+        assert res.failure_category == FailureCategory.HTML_INSTEAD_OF_PDF
+
+    def test_valid_pdf_structure(self):
+        from annual_reports.pakistan.validation import validate_pdf_content
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "Annual Report 2024 Audited Financial Statements")
+        raw = doc.tobytes()
+        doc.close()
+
+        res = validate_pdf_content(raw)
+        assert res.is_valid
+        assert res.page_count == 1
+        assert res.sha256 == hashlib.sha256(raw).hexdigest()
+
+    def test_quarterly_content_rejection(self):
+        from annual_reports.pakistan.validation import validate_pdf_content, FailureCategory
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "Condensed Interim Financial Statements First Quarter Report 2024")
+        raw = doc.tobytes()
+        doc.close()
+
+        res = validate_pdf_content(raw)
+        assert not res.is_valid
+        assert res.failure_category == FailureCategory.QUARTERLY_NOT_ANNUAL
+
+
+# ── Crash-Resume & Durability (Requirement 38) ────────────────────────────
+
+class TestCrashResume:
+    def test_resumability_skips_existing(self, tmp_path: Path):
+        """Verified existing reports must be skipped; no duplicate downloads."""
+        from annual_reports.pakistan.autonomous import _check_existing
+        from annual_reports.pakistan.config import PakistanConfig
+
+        config = PakistanConfig(
+            drive_root=tmp_path / "Drive",
+            pakistan_root=tmp_path / "Drive" / "Pakistan stock",
+            local_runtime=tmp_path / "runtime",
+            state_path=tmp_path / "runtime" / "harvest.sqlite3",
+        )
+        c = PakistanCompany(company_name="Systems Limited", psx_symbol="SYS")
+        rep = PakistanReport(company=c, fiscal_year=2024, pdf_url="https://example.com/ar.pdf")
+
+        # Simulate pre-existing file on Drive
+        target = config.pakistan_root / rep.relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"%PDF-1.4 simulated pdf")
+
+        assert _check_existing(config, rep)
+
+    def test_folder_cleanliness_verification(self, tmp_path: Path):
+        """Company folders should contain ONLY .pdf files, no stray logs or temp files."""
+        from annual_reports.pakistan.audit import AuditManager
+        from annual_reports.pakistan.config import PakistanConfig
+
+        config = PakistanConfig(
+            drive_root=tmp_path,
+            pakistan_root=tmp_path / "Pakistan stock",
+            local_runtime=tmp_path / "runtime",
+            state_path=tmp_path / "state.sqlite3",
+        )
+        profile_store = SourceProfileStore(tmp_path / "prof.sqlite3")
+        mgr = AuditManager(config, profile_store)
+
+        # Clean folder with pdf
+        comp_dir = config.pakistan_root / "HBL [HBL]" / "FY2024"
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / "report.pdf").write_bytes(b"pdf")
+
+        violations = mgr.verify_folder_cleanliness(config.pakistan_root)
+        assert len(violations) == 0
+
+        # Inject dirty file
+        (comp_dir / "debug.log").write_text("junk")
+        violations2 = mgr.verify_folder_cleanliness(config.pakistan_root)
+        assert len(violations2) == 1
+        assert "debug.log" in violations2[0]
+        profile_store.close()

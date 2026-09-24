@@ -26,11 +26,13 @@ try:
 except ImportError:
     import fitz
 
+from urllib.parse import urlsplit
+
 from ..catalog import Report
 from ..engine import (
     Settings, StateStore, RunLock, Result, native_path,
     interleave_by_host, validate_and_store, inspect_pdf, verify_store,
-    cleanup_orphan_parts,
+    cleanup_orphan_parts, run as engine_run,
 )
 from .company import PakistanCompany
 from .config import PakistanConfig, COUNTRY, EXCHANGE_MIC
@@ -39,6 +41,9 @@ from .discovery import discover_batch, Candidate
 from .report import PakistanReport
 from .source_profile import SourceProfileStore
 from .universe import resolve_companies
+from .validation import validate_pdf_content, FailureCategory, ValidationStage
+from .gap_recovery import GapRecoveryManager
+from .audit import AuditManager
 
 
 @dataclass
@@ -247,7 +252,6 @@ async def harvest(
             allow_http=False,
         )
 
-        from ..engine import run as engine_run
         summary = await engine_run(engine_reports, settings, progress=progress_callback)
 
         result.downloaded = summary.get("downloaded", 0)
@@ -257,26 +261,93 @@ async def harvest(
         result.http_429_count = summary.get("http_429_attempts", 0)
         result.http_5xx_count = summary.get("http_5xx_attempts", 0)
 
-        # Update profile store with results
+        # Multi-stage validation of downloaded reports
         for pak_report in download_queue:
             target = config.pakistan_root / pak_report.relative_path
-            if os.path.isfile(native_path(target)):
-                raw = open(native_path(target), "rb").read()
-                sha = hashlib.sha256(raw).hexdigest()
-                try:
-                    pages = inspect_pdf(raw)
+            p_native = native_path(target)
+            hostname = urlsplit(pak_report.pdf_url).hostname or ""
+
+            if os.path.isfile(p_native):
+                raw = open(p_native, "rb").read()
+                val_res = validate_pdf_content(
+                    raw,
+                    expected_symbol=pak_report.company.psx_symbol,
+                    expected_fy=pak_report.fiscal_year,
+                    expected_company_name=pak_report.company.company_name,
+                )
+
+                if val_res.is_valid:
                     profile_store.mark_downloaded(
                         pak_report.company.identity_key,
                         pak_report.fiscal_year,
                         pak_report.pdf_url,
-                        sha256=sha,
-                        file_size=len(raw),
-                        page_count=pages,
+                        sha256=val_res.sha256,
+                        file_size=val_res.file_size,
+                        page_count=val_res.page_count,
                         relative_path=str(pak_report.relative_path),
+                        stage=val_res.stage.value,
                     )
+                    profile_store.record_host_result(hostname, success=True)
                     result.verified += 1
-                except Exception:
-                    pass
+                else:
+                    # Invalid report - remove corrupt/quarterly file from user folder
+                    try:
+                        os.remove(p_native)
+                    except OSError:
+                        pass
+                    profile_store.mark_failure(
+                        pak_report.company.identity_key,
+                        pak_report.fiscal_year,
+                        pak_report.pdf_url,
+                        failure_category=val_res.failure_category.value,
+                        reason=val_res.failure_reason,
+                    )
+                    profile_store.record_host_result(hostname, success=False)
+                    result.failed += 1
+            else:
+                profile_store.record_host_result(hostname, success=False)
+
+    # ── Pass 2: Targeted Gap Recovery ─────────────────────────────────
+    gap_manager = GapRecoveryManager(config, profile_store)
+    unresolved_gaps = gap_manager.identify_gaps(companies, years)
+
+    if unresolved_gaps:
+        recovered = await gap_manager.recover_gaps(unresolved_gaps)
+        if recovered:
+            gap_manifest_path = config.manifests_dir / f"gap-manifest-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+            gap_manager.export_gap_manifest(recovered, gap_manifest_path)
+
+            gap_settings = Settings(
+                output_root=config.pakistan_root,
+                state_path=config.state_path,
+                workers=min(config.workers, len(recovered)),
+                per_host=config.per_host,
+                timeout_s=config.timeout_s,
+                max_mib=config.max_mib,
+                attempts=config.attempts,
+                allow_http=False,
+            )
+            gap_summary = await engine_run(recovered, gap_settings)
+            result.downloaded += gap_summary.get("downloaded", 0)
+            result.bytes_downloaded += gap_summary.get("bytes", 0)
+
+            for pak_rep in recovered:
+                target = config.pakistan_root / pak_rep.relative_path
+                p_native = native_path(target)
+                if os.path.isfile(p_native):
+                    raw = open(p_native, "rb").read()
+                    v_res = validate_pdf_content(raw)
+                    if v_res.is_valid:
+                        profile_store.mark_downloaded(
+                            pak_rep.company.identity_key,
+                            pak_rep.fiscal_year,
+                            pak_rep.pdf_url,
+                            sha256=v_res.sha256,
+                            file_size=v_res.file_size,
+                            page_count=v_res.page_count,
+                            relative_path=str(pak_rep.relative_path),
+                        )
+                        result.verified += 1
 
     # ── Gap matrix ────────────────────────────────────────────────────
     company_ids = [c.identity_key for c in companies]
@@ -285,13 +356,13 @@ async def harvest(
         1 for row in gap.values() for s in row.values() if s == "MISSING"
     )
     result.needs_review = sum(
-        1 for row in gap.values() for s in row.values() if s == "FOUND_REVIEW"
+        1 for row in gap.values() for s in row.values() if s in ("REVIEW", "IDENTIFIER_REVIEW")
     )
 
     # Export gap matrix
     profile_store.export_gap_csv(gap, config.audits_dir / "company-year-matrix.csv", years)
 
-    # ── Finalize ──────────────────────────────────────────────────────
+    # ── Finalize & Audits ─────────────────────────────────────────────
     result.elapsed_s = round(time.monotonic() - started, 3)
     if result.elapsed_s > 0:
         result.pdfs_per_second = round(result.downloaded / result.elapsed_s, 2)
@@ -299,14 +370,16 @@ async def harvest(
             result.bytes_downloaded / (1024 * 1024) / result.elapsed_s, 2
         )
 
-    # Save run summary
-    _save_run_summary(config, result)
+    # Generate complete auditable provenance artifacts
+    audit_mgr = AuditManager(config, profile_store)
+    audit_mgr.generate_audits(result.to_dict(), companies, years)
 
-    # Snapshot state to Drive
+    # Snapshot state and profiles safely to Drive
     try:
+        profile_store.snapshot_to_drive(config.source_profiles_dir)
         profile_store.snapshot_to_drive(config.state_backups_dir)
     except Exception:
-        pass  # Non-fatal; Drive may be temporarily unavailable
+        pass  # Non-fatal; Drive may be temporarily syncing
 
     profile_store.close()
     return result

@@ -5,19 +5,64 @@ This seed list is used for initial resolution; the system learns and
 persists source profiles for each company after first successful discovery.
 """
 
-from __future__ import annotations
-
+import csv
+from pathlib import Path
 from .company import PakistanCompany
+from .identity import normalize_ticker
+from .fiscal_year import build_expected_company_years, FiscalPeriod
+
+_HISTORICAL_CSV_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "reference" / "psx_historical_universe.csv"
+
+
+def load_historical_universe(csv_path: Path | None = None) -> list[PakistanCompany]:
+    """Load Pakistan companies from authoritative historical reference CSV."""
+    path = csv_path or _HISTORICAL_CSV_PATH
+    if not path.is_file():
+        return get_seed_universe()
+
+    companies: list[PakistanCompany] = []
+    try:
+        with open(path, mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                symbol = normalize_ticker(row.get("current_symbol", ""))
+                former_names = [n.strip() for n in row.get("former_company_names", "").split("|") if n.strip()]
+                former_syms = [s.strip() for s in row.get("former_symbols", "").split("|") if s.strip()]
+                aliases = list(set([symbol] + former_syms + [row.get("current_company_name", "")] + former_names))
+
+                comp = PakistanCompany(
+                    company_name=row.get("current_company_name", ""),
+                    psx_symbol=symbol,
+                    official_website=row.get("official_website", ""),
+                    isin=row.get("isin", ""),
+                    lei=row.get("lei", ""),
+                    secp_registration=row.get("secp_registration", ""),
+                    listing_date=row.get("listing_date", ""),
+                    delisting_date=row.get("delisting_date", ""),
+                    fiscal_year_end=row.get("fiscal_year_end", "December 31"),
+                    historical_names=former_names,
+                    historical_symbols=former_syms,
+                    aliases=aliases,
+                    sector=row.get("sector", ""),
+                    identity_status="RESOLVED",
+                    source_confidence="HIGH",
+                )
+                companies.append(comp)
+    except Exception:
+        return get_seed_universe()
+
+    return companies or get_seed_universe()
 
 
 def resolve_companies(queries: list[str]) -> list[PakistanCompany]:
     """Resolve user-provided company names/tickers to PakistanCompany objects.
 
     Accepts ticker symbols (e.g. ``HBL``), full names (e.g. ``Habib Bank``),
-    or mixed lists.  Returns matched companies from the seed universe.
+    former names (e.g. ``Summit Bank``), or mixed lists.
+    Returns matched companies from the historical universe.
     Unmatched queries are returned with identity_status='REVIEW'.
     """
-    universe = get_seed_universe()
+    universe = load_historical_universe()
     results: list[PakistanCompany] = []
     for query in queries:
         matched = False
@@ -28,7 +73,7 @@ def resolve_companies(queries: list[str]) -> list[PakistanCompany]:
                 break
         if not matched:
             # Create a stub company for unresolved queries
-            symbol = query.strip().upper().replace(" ", "")
+            symbol = normalize_ticker(query)
             if len(symbol) > 10:
                 symbol = symbol[:10]
             results.append(PakistanCompany(
